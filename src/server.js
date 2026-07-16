@@ -1,6 +1,7 @@
 const app = require('./app');
 const { initializeDatabase } = require('./config/db');
 require('dotenv').config();
+// Trigger restart 2
 
 const PORT = process.env.PORT || 5000;
 

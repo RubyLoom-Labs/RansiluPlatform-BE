@@ -54,9 +54,16 @@ exports.getArtists = async (req, res) => {
     }
 
     if (role) {
-      if (['music', 'lyrics', 'singer', 'band', 'other'].includes(role.toLowerCase())) {
+      if (role.toLowerCase() === 'artist') {
+        whereClauses.push('(a.singer = 1 OR a.band = 1)');
+      } else if (['music', 'lyrics', 'singer', 'band', 'other'].includes(role.toLowerCase())) {
         whereClauses.push(`a.${role.toLowerCase()} = 1`);
       }
+    }
+
+    // Dropdown fields select active artists only
+    if (role) {
+      whereClauses.push('a.status = 1');
     }
 
     if (gender) {
@@ -93,11 +100,16 @@ exports.getArtists = async (req, res) => {
       orderBy = 'ORDER BY a.artist_code ASC';
     }
 
+    // Default to sorting by artist code for dropdown listings (when role is set but sort parameter is omitted)
+    if (!sort && role) {
+      orderBy = 'ORDER BY a.artist_code ASC';
+    }
+
     // Fetch paginated and filtered records
     let dataQuery = `
-      SELECT a.*, COUNT(sa.song_id) as songsCount 
+      SELECT a.*, COUNT(ss.song_id) as songsCount 
       FROM artists a 
-      LEFT JOIN song_artists sa ON a.id = sa.artist_id AND sa.role = 'singer'
+      LEFT JOIN songSinger ss ON a.id = ss.artist_id
       ${whereClauseStr}
       GROUP BY a.id 
       ${orderBy}

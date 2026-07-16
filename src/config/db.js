@@ -109,7 +109,7 @@ async function seedInitialData() {
       const [songResult] = await pool.query(
         `INSERT INTO songs (name, nameSinhala, status, versionType, ownership, notes, conflict, trackUrl, imageUrl) 
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [song.name, song.nameSinhala, song.status, song.versionType, song.ownership, song.notes, song.conflict, song.trackUrl, song.imageUrl]
+        [song.name, song.nameSinhala, song.status === 'Active' ? 1 : 0, song.versionType, song.ownership, song.notes, song.conflict, song.trackUrl, song.imageUrl]
       );
       const songId = songResult.insertId;
 
@@ -117,7 +117,7 @@ async function seedInitialData() {
       for (const singerName of song.singers) {
         const [artist] = await pool.query('SELECT id FROM artists WHERE name = ?', [singerName]);
         if (artist.length > 0) {
-          await pool.query('INSERT INTO song_artists (song_id, artist_id, role) VALUES (?, ?, ?)', [songId, artist[0].id, 'singer']);
+          await pool.query('INSERT INTO songSinger (song_id, artist_id) VALUES (?, ?)', [songId, artist[0].id]);
         }
       }
 
@@ -125,7 +125,7 @@ async function seedInitialData() {
       for (const lyricistName of song.lyricists) {
         const [artist] = await pool.query('SELECT id FROM artists WHERE name = ?', [lyricistName]);
         if (artist.length > 0) {
-          await pool.query('INSERT INTO song_artists (song_id, artist_id, role) VALUES (?, ?, ?)', [songId, artist[0].id, 'lyricist']);
+          await pool.query('INSERT INTO songLyrics (song_id, artist_id) VALUES (?, ?)', [songId, artist[0].id]);
         }
       }
 
@@ -133,7 +133,7 @@ async function seedInitialData() {
       for (const musicianName of song.musicians) {
         const [artist] = await pool.query('SELECT id FROM artists WHERE name = ?', [musicianName]);
         if (artist.length > 0) {
-          await pool.query('INSERT INTO song_artists (song_id, artist_id, role) VALUES (?, ?, ?)', [songId, artist[0].id, 'musician']);
+          await pool.query('INSERT INTO songmusician (song_id, artist_id) VALUES (?, ?)', [songId, artist[0].id]);
         }
       }
     }

@@ -2,6 +2,16 @@ const { getPool } = require('../config/db');
 const fs = require('fs');
 const path = require('path');
 
+// Helper to convert artist name to simple English letters (lowercase, a-z, and single spaces only)
+function toSimpleName(str) {
+  if (!str) return '';
+  return str
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Function to generate the next sequential artist code
 async function generateArtistCode(pool) {
   const [rows] = await pool.query(
@@ -18,21 +28,91 @@ async function generateArtistCode(pool) {
   return 'ART' + String(nextNum).padStart(6, '0');
 }
 
-// Get all artists
+// Get all artists (with server-side pagination, filtering, and sorting)
 exports.getArtists = async (req, res) => {
   try {
     const pool = getPool();
-    const [artists] = await pool.query(`
+    
+    // Parse query parameters
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 10;
+    const offset = (page - 1) * limit;
+    
+    const search = req.query.search || '';
+    const role = req.query.role || '';
+    const gender = req.query.gender || '';
+    const sort = req.query.sort || '';
+    const isExport = req.query.export === 'true';
+
+    // Build WHERE clause
+    let whereClauses = [];
+    let queryParams = [];
+
+    if (search) {
+      whereClauses.push('(a.name LIKE ? OR a.artist_code LIKE ?)');
+      queryParams.push(`%${search}%`, `%${search}%`);
+    }
+
+    if (role) {
+      if (['music', 'lyrics', 'singer', 'band', 'other'].includes(role.toLowerCase())) {
+        whereClauses.push(`a.${role.toLowerCase()} = 1`);
+      }
+    }
+
+    if (gender) {
+      let dbGender = '';
+      if (gender === 'Male' || gender === 'M') dbGender = 'M';
+      else if (gender === 'Female' || gender === 'F') dbGender = 'F';
+      else if (gender === 'Other/Band' || gender === 'Other/Group' || gender === 'O' || gender === 'Other') dbGender = 'O';
+      
+      if (dbGender) {
+        whereClauses.push('a.gender = ?');
+        queryParams.push(dbGender);
+      }
+    }
+
+    const whereClauseStr = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+
+    // Get total count of matching records
+    const countQuery = `
+      SELECT COUNT(DISTINCT a.id) as total 
+      FROM artists a
+      ${whereClauseStr}
+    `;
+    const [countRows] = await pool.query(countQuery, queryParams);
+    const totalCount = countRows[0].total;
+
+    // Determine sorting order
+    let orderBy = 'ORDER BY a.id DESC';
+    if (sort === 'Songs A-Z' || sort === 'Artists A-Z') {
+      orderBy = 'ORDER BY a.name ASC';
+    }
+    
+    // Sort by artist code if no filter is added during export
+    if (isExport && !search && !role && !gender) {
+      orderBy = 'ORDER BY a.artist_code ASC';
+    }
+
+    // Fetch paginated and filtered records
+    let dataQuery = `
       SELECT a.*, COUNT(sa.song_id) as songsCount 
       FROM artists a 
       LEFT JOIN song_artists sa ON a.id = sa.artist_id AND sa.role = 'singer'
+      ${whereClauseStr}
       GROUP BY a.id 
-      ORDER BY a.id DESC
-    `);
+      ${orderBy}
+    `;
+    
+    let queryParamsForData = [...queryParams];
+    if (!isExport) {
+      dataQuery += ' LIMIT ? OFFSET ?';
+      queryParamsForData.push(limit, offset);
+    }
+    
+    const [artists] = await pool.query(dataQuery, queryParamsForData);
 
     const host = `${req.protocol}://${req.get('host')}`;
     const formattedArtists = artists.map((artist) => {
-      // Synthesize types array from individual boolean columns for UI compatibility
       const types = [];
       if (artist.music) types.push('music');
       if (artist.lyrics) types.push('lyrics');
@@ -45,8 +125,8 @@ exports.getArtists = async (req, res) => {
         name: artist.name,
         code: artist.artist_code,
         artist_code: artist.artist_code,
-        gender: artist.gender, // 'M' or 'F'
-        types, // tags representation
+        gender: artist.gender,
+        types,
         music: artist.music === 1 || artist.music === true,
         lyrics: artist.lyrics === 1 || artist.lyrics === true,
         singer: artist.singer === 1 || artist.singer === true,
@@ -63,7 +143,10 @@ exports.getArtists = async (req, res) => {
       };
     });
 
-    res.json(formattedArtists);
+    res.json({
+      artists: formattedArtists,
+      totalCount
+    });
   } catch (error) {
     console.error('Error fetching artists:', error);
     res.status(500).json({ message: 'Internal server error' });
@@ -78,6 +161,11 @@ exports.createArtist = async (req, res) => {
 
     if (!name) {
       return res.status(400).json({ message: 'Name is required' });
+    }
+
+    const simpleName = toSimpleName(name);
+    if (!simpleName) {
+      return res.status(400).json({ message: 'Name must contain English letters' });
     }
 
     const parseBool = (val) => {
@@ -117,7 +205,7 @@ exports.createArtist = async (req, res) => {
     const [result] = await pool.query(
       `INSERT INTO artists (name, artist_code, gender, music, lyrics, singer, band, other, image, status) 
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [name, artistCode, gender, music, lyrics, singer, band, other, imagePath, status]
+      [simpleName, artistCode, gender, music, lyrics, singer, band, other, imagePath, status]
     );
 
     const host = `${req.protocol}://${req.get('host')}`;
@@ -133,7 +221,7 @@ exports.createArtist = async (req, res) => {
 
     res.status(201).json({
       id: newArtistId,
-      name,
+      name: simpleName,
       code: artistCode,
       artist_code: artistCode,
       gender,
@@ -163,6 +251,11 @@ exports.updateArtist = async (req, res) => {
 
     if (!name) {
       return res.status(400).json({ message: 'Name is required' });
+    }
+
+    const simpleName = toSimpleName(name);
+    if (!simpleName) {
+      return res.status(400).json({ message: 'Name must contain English letters' });
     }
 
     const parseBool = (val) => {
@@ -217,14 +310,14 @@ exports.updateArtist = async (req, res) => {
         `UPDATE artists 
          SET name = ?, gender = ?, music = ?, lyrics = ?, singer = ?, band = ?, other = ?, image = ?, status = ?
          WHERE id = ?`,
-        [name, genderValue, music, lyrics, singer, band, other, imagePath, status, id]
+        [simpleName, genderValue, music, lyrics, singer, band, other, imagePath, status, id]
       );
     } else {
       await pool.query(
         `UPDATE artists 
          SET name = ?, gender = ?, music = ?, lyrics = ?, singer = ?, band = ?, other = ?, status = ?
          WHERE id = ?`,
-        [name, genderValue, music, lyrics, singer, band, other, status, id]
+        [simpleName, genderValue, music, lyrics, singer, band, other, status, id]
       );
     }
 
@@ -262,6 +355,36 @@ exports.updateArtist = async (req, res) => {
     });
   } catch (error) {
     console.error('Error updating artist:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// Check if artist name exists in simple form
+exports.checkArtistName = async (req, res) => {
+  try {
+    const pool = getPool();
+    const { name, id } = req.body;
+
+    if (!name) {
+      return res.status(400).json({ message: 'Name is required' });
+    }
+
+    const simpleInput = toSimpleName(name);
+
+    let query = 'SELECT id, name FROM artists';
+    let queryParams = [];
+    if (id) {
+      query += ' WHERE id != ?';
+      queryParams.push(id);
+    }
+
+    const [rows] = await pool.query(query, queryParams);
+
+    const exists = rows.some((row) => toSimpleName(row.name) === simpleInput);
+
+    res.json({ exists });
+  } catch (error) {
+    console.error('Error checking artist name:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 };

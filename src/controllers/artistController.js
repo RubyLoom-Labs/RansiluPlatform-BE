@@ -400,3 +400,53 @@ exports.checkArtistName = async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+// Get a single artist by ID
+exports.getArtistById = async (req, res) => {
+  try {
+    const pool = getPool();
+    const artistId = parseInt(req.params.id, 10);
+    if (isNaN(artistId)) {
+      return res.status(400).json({ message: 'Invalid artist ID' });
+    }
+
+    const [rows] = await pool.query('SELECT * FROM artists WHERE id = ?', [artistId]);
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Artist not found' });
+    }
+
+    const artist = rows[0];
+    const types = [];
+    if (artist.music) types.push('music');
+    if (artist.lyrics) types.push('lyrics');
+    if (artist.singer) types.push('singer');
+    if (artist.band) types.push('band');
+    if (artist.other) types.push('other');
+
+    const host = `${req.protocol}://${req.get('host')}`;
+
+    res.json({
+      id: artist.id,
+      name: artist.name,
+      code: artist.artist_code,
+      artist_code: artist.artist_code,
+      gender: artist.gender,
+      types,
+      music: artist.music === 1 || artist.music === true,
+      lyrics: artist.lyrics === 1 || artist.lyrics === true,
+      singer: artist.singer === 1 || artist.singer === true,
+      band: artist.band === 1 || artist.band === true,
+      other: artist.other === 1 || artist.other === true,
+      status: artist.status === 1 || artist.status === true,
+      avatar: artist.image 
+        ? (artist.image.startsWith('http') ? artist.image : `${host}${artist.image}`) 
+        : 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=200&h=200',
+      imageUrl: artist.image 
+        ? (artist.image.startsWith('http') ? artist.image : `${host}${artist.image}`) 
+        : null,
+    });
+  } catch (error) {
+    console.error('Error fetching artist by ID:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};

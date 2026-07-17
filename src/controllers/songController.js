@@ -314,10 +314,27 @@ exports.getSongById = async (req, res) => {
     }
     const song = songs[0];
 
-    // Fetch singer, lyricist, musician relations (IDs)
-    const [singers] = await pool.query('SELECT artist_id FROM songSinger WHERE song_id = ?', [songId]);
-    const [lyricists] = await pool.query('SELECT artist_id FROM songLyrics WHERE song_id = ?', [songId]);
-    const [musicians] = await pool.query('SELECT artist_id FROM songmusician WHERE song_id = ?', [songId]);
+    // Fetch singer, lyricist, musician relations (IDs and names)
+    const [singers] = await pool.query(`
+      SELECT ss.artist_id, a.name 
+      FROM songSinger ss 
+      JOIN artists a ON ss.artist_id = a.id 
+      WHERE ss.song_id = ?
+    `, [songId]);
+    
+    const [lyricists] = await pool.query(`
+      SELECT sl.artist_id, a.name 
+      FROM songLyrics sl 
+      JOIN artists a ON sl.artist_id = a.id 
+      WHERE sl.song_id = ?
+    `, [songId]);
+    
+    const [musicians] = await pool.query(`
+      SELECT sm.artist_id, a.name 
+      FROM songmusician sm 
+      JOIN artists a ON sm.artist_id = a.id 
+      WHERE sm.song_id = ?
+    `, [songId]);
 
     const host = `${req.protocol}://${req.get('host')}`;
     res.json({
@@ -340,6 +357,9 @@ exports.getSongById = async (req, res) => {
       singers: singers.map(s => String(s.artist_id)),
       lyricists: lyricists.map(l => String(l.artist_id)),
       musicians: musicians.map(m => String(m.artist_id)),
+      artist: singers.length > 0 ? singers.map(s => s.name).join(', ') : 'None',
+      lyrics: lyricists.length > 0 ? lyricists.map(l => l.name).join(', ') : 'None',
+      music: musicians.length > 0 ? musicians.map(m => m.name).join(', ') : 'None',
     });
   } catch (error) {
     console.error('Error fetching song by ID:', error);
@@ -501,19 +521,19 @@ exports.updateSong = async (req, res) => {
     if (Array.isArray(lyricists)) await insertRelations(lyricists, 'songLyrics');
     if (Array.isArray(musicians)) await insertRelations(musicians, 'songmusician');
 
-    // Get list of names for returning representation
-    const getArtistNamesByRole = async (tableName) => {
+    // Get list of names and IDs for returning representation
+    const getArtistDetailsByRole = async (tableName) => {
       const [artists] = await pool.query(`
-        SELECT a.name FROM ${tableName} t 
+        SELECT a.id, a.name FROM ${tableName} t 
         JOIN artists a ON t.artist_id = a.id 
         WHERE t.song_id = ?
       `, [songId]);
-      return artists.map(a => a.name);
+      return artists;
     };
 
-    const singerNames = await getArtistNamesByRole('songSinger');
-    const lyricistNames = await getArtistNamesByRole('songLyrics');
-    const musicianNames = await getArtistNamesByRole('songmusician');
+    const singersData = await getArtistDetailsByRole('songSinger');
+    const lyricistsData = await getArtistDetailsByRole('songLyrics');
+    const musiciansData = await getArtistDetailsByRole('songmusician');
 
     const host = `${req.protocol}://${req.get('host')}`;
 
@@ -522,10 +542,10 @@ exports.updateSong = async (req, res) => {
       name,
       nameSinhala,
       status: (currentSong.status === 1 || currentSong.status === true || currentSong.status === '1') ? 'Active' : 'Inactive',
-      artist: singerNames.length > 0 ? singerNames.join(', ') : 'None',
-      artistSub: singerNames.length > 1 ? 'Due - Second Artist' : '',
-      lyrics: lyricistNames.length > 0 ? lyricistNames.join(', ') : 'None',
-      music: musicianNames.length > 0 ? musicianNames.join(', ') : 'None',
+      artist: singersData.length > 0 ? singersData.map(s => s.name).join(', ') : 'None',
+      artistSub: singersData.length > 1 ? 'Due - Second Artist' : '',
+      lyrics: lyricistsData.length > 0 ? lyricistsData.map(l => l.name).join(', ') : 'None',
+      music: musiciansData.length > 0 ? musiciansData.map(m => m.name).join(', ') : 'None',
       ownership: currentSong.ownership || 100,
       notes: currentSong.notes || 'No Cases Or Notes',
       conflict: currentSong.conflict || 'No',
@@ -539,6 +559,9 @@ exports.updateSong = async (req, res) => {
       addedDate,
       trackUrl: trackUrl ? (trackUrl.startsWith('http') ? trackUrl : `${host}${trackUrl}`) : null,
       imageUrl: imageUrl ? (imageUrl.startsWith('http') ? imageUrl : `${host}${imageUrl}`) : null,
+      singers: singersData.map(s => String(s.id)),
+      lyricists: lyricistsData.map(l => String(l.id)),
+      musicians: musiciansData.map(m => String(m.id)),
     });
   } catch (error) {
     console.error('Error updating song:', error);

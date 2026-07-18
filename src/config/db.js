@@ -76,7 +76,7 @@ async function seedInitialData() {
   if (songsCount[0].count === 0) {
     const mockSongs = [
       {
-        name: 'Song Name Shinhala',
+        name: 'song name shinhala',
         nameSinhala: 'ගීතයේ නම සිංහලෙන්',
         status: 'Active',
         versionType: 'Original',
@@ -90,7 +90,7 @@ async function seedInitialData() {
         musicians: ['Dhanushka Perera']
       },
       {
-        name: 'Amma Shinhala Melody',
+        name: 'amma shinhala melody',
         nameSinhala: 'අම්මා සිංහල මෙලඩි',
         status: 'Active',
         versionType: 'Original',
@@ -138,6 +138,42 @@ async function seedInitialData() {
       }
     }
     console.log('Seeded initial mock songs.');
+  }
+
+  // 3. Seed Distributors
+  const [distributorsCount] = await pool.query('SELECT COUNT(*) as count FROM distributors');
+  if (distributorsCount[0].count === 0) {
+    const mockDistributors = [
+      ['DST000001', 'ransilu@gmail.com', 'ransilu distribution', 30.00, 1],
+      ['DST000002', 'evoke@gmail.com', 'evoke distribution', 20.00, 1],
+      ['DST000003', 'dell@gmail.com', 'dell distribution', 25.00, 1]
+    ];
+    for (const dist of mockDistributors) {
+      await pool.query(
+        `INSERT INTO distributors (distributor_code, email, company_name, outgoing_percentage, status) 
+         VALUES (?, ?, ?, ?, ?)`,
+        dist
+      );
+    }
+    console.log('Seeded initial mock distributors.');
+  }
+
+  // 4. Seed Ringtones
+  const [ringtonesCount] = await pool.query('SELECT COUNT(*) as count FROM ringintone');
+  if (ringtonesCount[0].count === 0) {
+    const mockRingtones = [
+      ['dialog axiata plc', 'https://images.unsplash.com/photo-1614741118887-7a4ee193a5fa?auto=format&fit=crop&q=80&w=120&h=120', 1],
+      ['mobitel (pvt) ltd', 'https://images.unsplash.com/photo-1557200134-90327ee9fafa?auto=format&fit=crop&q=80&w=120&h=120', 1],
+      ['hutchison telecommunications', 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&q=80&w=120&h=120', 1]
+    ];
+    for (const ring of mockRingtones) {
+      await pool.query(
+        `INSERT INTO ringintone (name, company_logo, status) 
+         VALUES (?, ?, ?)`,
+        ring
+      );
+    }
+    console.log('Seeded initial mock ringtones.');
   }
 }
 

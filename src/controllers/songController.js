@@ -1,13 +1,76 @@
 const { getPool } = require('../config/db');
 
+function getSriLankaTimestamp() {
+  const now = new Date();
+  const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+  const slTime = new Date(utc + (3600000 * 5.5));
+  const pad = (num) => String(num).padStart(2, '0');
+  return `${slTime.getFullYear()}-${pad(slTime.getMonth() + 1)}-${pad(slTime.getDate())} ${pad(slTime.getHours())}:${pad(slTime.getMinutes())}:${pad(slTime.getSeconds())}`;
+}
+
+// Helper to convert string to Title Case (capitalizing the first letter of each word)
+function toTitleCase(str) {
+  if (!str) return '';
+  return str
+    .toLowerCase()
+    .split(' ')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
 // Get all songs
 exports.getSongs = async (req, res) => {
   try {
     const pool = getPool();
-    // 1. Fetch all songs
-    const [songs] = await pool.query('SELECT * FROM songs ORDER BY id DESC');
+    
+    // Parse query parameters
+    const page = req.query.page ? parseInt(req.query.page, 10) : null;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 10;
+    const offset = page ? (page - 1) * limit : 0;
+    
+    const search = req.query.search || '';
+    const versionType = req.query.versionType || '';
+    const excludeId = req.query.excludeId ? parseInt(req.query.excludeId, 10) : null;
+    
+    // Build WHERE clauses
+    let whereClauses = [];
+    let queryParams = [];
+    
+    if (search) {
+      whereClauses.push('(name LIKE ? OR nameSinhala LIKE ?)');
+      queryParams.push(`%${search}%`, `%${search}%`);
+    }
+    
+    if (versionType) {
+      whereClauses.push('versionType = ?');
+      queryParams.push(versionType);
+    }
+
+    if (excludeId) {
+      whereClauses.push('id != ?');
+      queryParams.push(excludeId);
+    }
+    
+    const whereClauseStr = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+    
+    // Fetch total count if paginated
+    let totalCount = 0;
+    if (page) {
+      const [countRows] = await pool.query(`SELECT COUNT(*) as total FROM songs ${whereClauseStr}`, queryParams);
+      totalCount = countRows[0].total;
+    }
+    
+    // Fetch records
+    let dataQuery = `SELECT * FROM songs ${whereClauseStr} ORDER BY id DESC`;
+    let queryParamsForData = [...queryParams];
+    if (page) {
+      dataQuery += ' LIMIT ? OFFSET ?';
+      queryParamsForData.push(limit, offset);
+    }
+    
+    const [songs] = await pool.query(dataQuery, queryParamsForData);
     if (songs.length === 0) {
-      return res.json([]);
+      return res.json(page ? { songs: [], totalCount: 0 } : []);
     }
 
     const songIds = songs.map((s) => s.id);
@@ -45,13 +108,48 @@ exports.getSongs = async (req, res) => {
       }
     });
 
+    // 3.1 Fetch active distributor relations
+    const [distRelations] = await pool.query(`
+      SELECT sd.song_id, sd.distributor_id, d.company_name
+      FROM songdistributor sd
+      JOIN distributors d ON sd.distributor_id = d.id
+      WHERE sd.song_id IN (?) AND sd.status = 1
+    `, [songIds]);
+
+    const songDistributors = {};
+    distRelations.forEach((rel) => {
+      songDistributors[rel.song_id] = { id: rel.distributor_id, name: toTitleCase(rel.company_name) };
+    });
+
+    // 3.2 Fetch active ringtone relations
+    const [ringRelations] = await pool.query(`
+      SELECT sr.song_id, sr.ringintone_id, r.name, sr.ringtone_code, sr.content_code, sr.added_date
+      FROM songringintone sr
+      JOIN ringintone r ON sr.ringintone_id = r.id
+      WHERE sr.song_id IN (?) AND sr.status = 1
+    `, [songIds]);
+
+    const songRingtones = {};
+    ringRelations.forEach((rel) => {
+      songRingtones[rel.song_id] = {
+        id: rel.ringintone_id,
+        name: toTitleCase(rel.name),
+        ringtone_code: rel.ringtone_code,
+        content_code: rel.content_code,
+        added_date: rel.added_date
+      };
+    });
+
     // 4. Map songs to the shape expected by the frontend
     const host = `${req.protocol}://${req.get('host')}`;
     const formattedSongs = songs.map((song) => {
       const rels = songRelations[song.id] || { singers: [], lyricists: [], musicians: [] };
+      const dist = songDistributors[song.id] || null;
+      const ring = songRingtones[song.id] || null;
+
       return {
         id: song.id,
-        name: song.name,
+        name: toTitleCase(song.name), // Format song name to Title Case on fetch
         nameSinhala: song.nameSinhala,
         status: (song.status === 1 || song.status === true || song.status === '1') ? 'Active' : 'Inactive',
         artist: rels.singers.length > 0 ? rels.singers.join(', ') : 'None',
@@ -64,18 +162,25 @@ exports.getSongs = async (req, res) => {
         versionType: song.versionType || 'Original',
         versionName: song.versionName,
         originalSongId: song.originalSongId,
-        distributionProvider: song.distributionProvider,
-        ringtoneProvider: song.ringtoneProvider,
-        ringtoneId: song.ringtoneId,
-        contentCode: song.contentCode,
-        addedDate: song.addedDate,
+        isrcCode: song.isrcCode,
+        distributionProvider: dist ? dist.name : null,
+        distributorId: dist ? String(dist.id) : null,
+        ringtoneProvider: ring ? ring.name : null,
+        ringtoneId: ring ? ring.ringtone_code : null,
+        contentCode: ring ? ring.content_code : null,
+        addedDate: ring && ring.added_date ? ring.added_date.toISOString().split('T')[0] : null,
+        ringintoneId: ring ? String(ring.id) : null,
         trackUrl: song.trackUrl ? (song.trackUrl.startsWith('http') ? song.trackUrl : `${host}${song.trackUrl}`) : null,
         imageUrl: song.imageUrl ? (song.imageUrl.startsWith('http') ? song.imageUrl : `${host}${song.imageUrl}`) : null,
         createdAt: song.created_at,
       };
     });
 
-    res.json(formattedSongs);
+    if (page) {
+      res.json({ songs: formattedSongs, totalCount });
+    } else {
+      res.json(formattedSongs);
+    }
   } catch (error) {
     console.error('Error fetching songs:', error);
     res.status(500).json({ message: 'Internal server error' });
@@ -90,6 +195,16 @@ exports.createSong = async (req, res) => {
 
     if (!name || !nameSinhala) {
       return res.status(400).json({ message: 'Song name and Sinhala name are required' });
+    }
+
+    if (!isrcCode || !isrcCode.trim()) {
+      return res.status(400).json({ message: 'ISRC Code is required' });
+    }
+
+    // Verify ISRC uniqueness
+    const [existingIsrc] = await pool.query('SELECT id FROM songs WHERE isrcCode = ?', [isrcCode.trim()]);
+    if (existingIsrc.length > 0) {
+      return res.status(400).json({ message: 'ISRC Code already exists. It must be unique.' });
     }
 
     // Verify uploaded files
@@ -108,90 +223,52 @@ exports.createSong = async (req, res) => {
       if (!field) return [];
       if (Array.isArray(field)) return field;
       try {
-        // Handle comma-separated format if sent as string
         return String(field).split(',').map(s => s.trim()).filter(Boolean);
       } catch (e) {
         return [field];
       }
     };
 
-    // Support both direct fields and array index format from FormData
     const singers = getArrayInput(req.body.artists || req.body['artists[]'] || req.body['artists']);
     const lyricists = getArrayInput(req.body.lyrics || req.body['lyrics[]'] || req.body['lyrics']);
     const musicians = getArrayInput(req.body.music || req.body['music[]'] || req.body['music']);
 
-    // Parse options structures
     let versionName = null;
     let originalSongId = null;
-    if (req.body.versionDetails) {
+    if (versionType === 'Version' && req.body.versionDetails) {
       try {
         const details = typeof req.body.versionDetails === 'string' ? JSON.parse(req.body.versionDetails) : req.body.versionDetails;
         versionName = details.versionName;
-        // Make sure it is numeric ID
         originalSongId = details.originalSong && !isNaN(details.originalSong) ? parseInt(details.originalSong, 10) : null;
       } catch (e) {
         console.warn('Failed to parse versionDetails:', e.message);
       }
     }
 
-    let distributionProvider = null;
-    if (req.body.distribution) {
-      try {
-        const dist = typeof req.body.distribution === 'string' ? JSON.parse(req.body.distribution) : req.body.distribution;
-        distributionProvider = dist.provider;
-      } catch (e) {
-        console.warn('Failed to parse distribution:', e.message);
-      }
-    }
-
-    let ringtoneProvider = null;
-    let ringtoneId = null;
-    let contentCode = null;
-    let addedDate = null;
-    if (req.body.ringtone) {
-      try {
-        const rt = typeof req.body.ringtone === 'string' ? JSON.parse(req.body.ringtone) : req.body.ringtone;
-        ringtoneProvider = rt.provider;
-        ringtoneId = rt.ringtoneId;
-        contentCode = rt.contentCode;
-        addedDate = rt.addedDate && rt.addedDate.trim() !== '' ? rt.addedDate : null;
-      } catch (e) {
-        console.warn('Failed to parse ringtone:', e.message);
-      }
-    }
-
-    // Insert Song with boolean status (1/true by default)
+    // Insert Song - Save name in simple letters (lowercase)
+    const lowercaseName = name.trim().toLowerCase();
     const [songResult] = await pool.query(
       `INSERT INTO songs (
         name, nameSinhala, status, trackUrl, imageUrl, isrcCode, other, 
-        versionType, versionName, originalSongId, distributionProvider, 
-        ringtoneProvider, ringtoneId, contentCode, addedDate, ownership, notes, conflict
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        versionType, versionName, originalSongId, ownership, notes, conflict
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 100, 'No Cases Or Notes', 'No')`,
       [
-        name,
+        lowercaseName,
         nameSinhala,
-        1, // 1 (Active) boolean representation
+        1, // Active (true)
         trackUrl,
         imageUrl,
-        isrcCode || '',
+        isrcCode.trim(),
         other || '',
         versionType || 'Original',
         versionName,
-        originalSongId,
-        distributionProvider,
-        ringtoneProvider,
-        ringtoneId,
-        contentCode,
-        addedDate,
-        100, // Default ownership
-        'No Cases Or Notes', // Default notes
-        'No' // Default conflict
+        originalSongId
       ]
     );
 
     const songId = songResult.insertId;
 
-    // Helper to insert relationships into separate many-to-many tables
+    // Insert artist relations
     const insertRelations = async (artistIds, role) => {
       let tableName = 'songSinger';
       if (role === 'lyricist') tableName = 'songLyrics';
@@ -204,7 +281,7 @@ exports.createSong = async (req, res) => {
           if (artist.length > 0) {
             artistId = artist[0].id;
           } else {
-            continue; // Skip if artist doesn't exist
+            continue;
           }
         }
         await pool.query(
@@ -218,7 +295,65 @@ exports.createSong = async (req, res) => {
     await insertRelations(lyricists, 'lyricist');
     await insertRelations(musicians, 'musician');
 
-    // Get list of names for returning representation from separate tables
+    // 1. Save distributor mapping
+    let distributorId = null;
+    let distributionProvider = null;
+    if (req.body.distribution) {
+      try {
+        const dist = typeof req.body.distribution === 'string' ? JSON.parse(req.body.distribution) : req.body.distribution;
+        distributorId = dist.provider && !isNaN(dist.provider) ? parseInt(dist.provider, 10) : null;
+      } catch (e) {
+        console.warn('Failed to parse distribution:', e.message);
+      }
+    }
+
+    if (distributorId) {
+      await pool.query('UPDATE songdistributor SET status = 0 WHERE song_id = ?', [songId]);
+      await pool.query(
+        'INSERT INTO songdistributor (song_id, distributor_id, status) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE status = 1',
+        [songId, distributorId]
+      );
+      const [distNameRows] = await pool.query('SELECT company_name FROM distributors WHERE id = ?', [distributorId]);
+      if (distNameRows.length > 0) {
+        distributionProvider = toTitleCase(distNameRows[0].company_name);
+      }
+    }
+
+    // 2. Save ringtone mapping
+    let ringintoneId = null;
+    let ringtoneProvider = null;
+    let ringtoneId = null;
+    let contentCode = null;
+    let addedDate = null;
+    if (req.body.ringtone) {
+      try {
+        const rt = typeof req.body.ringtone === 'string' ? JSON.parse(req.body.ringtone) : req.body.ringtone;
+        if (rt) {
+          ringintoneId = rt.provider && !isNaN(rt.provider) ? parseInt(rt.provider, 10) : null;
+          ringtoneId = rt.ringtoneId;
+          contentCode = rt.contentCode;
+          addedDate = rt.addedDate && rt.addedDate.trim() !== '' ? rt.addedDate : null;
+        }
+      } catch (e) {
+        console.warn('Failed to parse ringtone:', e.message);
+      }
+    }
+
+    if (ringintoneId) {
+      await pool.query('UPDATE songringintone SET status = 0 WHERE song_id = ?', [songId]);
+      const slTimestamp = getSriLankaTimestamp();
+      await pool.query(
+        `INSERT INTO songringintone (song_id, ringintone_id, status, ringtone_code, content_code, added_date) 
+         VALUES (?, ?, 1, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE status = 1, ringtone_code = ?, content_code = ?, added_date = ?`,
+        [songId, ringintoneId, ringtoneId, contentCode, slTimestamp, ringtoneId, contentCode, slTimestamp]
+      );
+      const [ringNameRows] = await pool.query('SELECT name FROM ringintone WHERE id = ?', [ringintoneId]);
+      if (ringNameRows.length > 0) {
+        ringtoneProvider = toTitleCase(ringNameRows[0].name);
+      }
+    }
+
     const getArtistNamesByRole = async (role) => {
       let tableName = 'songSinger';
       if (role === 'lyricist') tableName = 'songLyrics';
@@ -240,7 +375,7 @@ exports.createSong = async (req, res) => {
 
     res.status(201).json({
       id: songId,
-      name,
+      name: toTitleCase(lowercaseName), // Return Title Case
       nameSinhala,
       status: 'Active',
       artist: singerNames.length > 0 ? singerNames.join(', ') : 'None',
@@ -253,11 +388,15 @@ exports.createSong = async (req, res) => {
       versionType: versionType || 'Original',
       versionName,
       originalSongId,
+      isrcCode,
+      other: other || '',
       distributionProvider,
+      distributorId: distributorId ? String(distributorId) : null,
       ringtoneProvider,
       ringtoneId,
       contentCode,
       addedDate,
+      ringintoneId: ringintoneId ? String(ringintoneId) : null,
       trackUrl: `${host}${trackUrl}`,
       imageUrl: `${host}${imageUrl}`,
       createdAt: new Date(),
@@ -314,7 +453,7 @@ exports.getSongById = async (req, res) => {
     }
     const song = songs[0];
 
-    // Fetch singer, lyricist, musician relations (IDs and names)
+    // Fetch singer, lyricist, musician relations
     const [singers] = await pool.query(`
       SELECT ss.artist_id, a.name 
       FROM songSinger ss 
@@ -336,10 +475,28 @@ exports.getSongById = async (req, res) => {
       WHERE sm.song_id = ?
     `, [songId]);
 
+    // Fetch active distributor
+    const [distRows] = await pool.query(`
+      SELECT sd.distributor_id, d.company_name
+      FROM songdistributor sd
+      JOIN distributors d ON sd.distributor_id = d.id
+      WHERE sd.song_id = ? AND sd.status = 1
+    `, [songId]);
+    const activeDist = distRows[0] || null;
+
+    // Fetch active ringtone
+    const [ringRows] = await pool.query(`
+      SELECT sr.ringintone_id, r.name, sr.ringtone_code, sr.content_code, sr.added_date
+      FROM songringintone sr
+      JOIN ringintone r ON sr.ringintone_id = r.id
+      WHERE sr.song_id = ? AND sr.status = 1
+    `, [songId]);
+    const activeRing = ringRows[0] || null;
+
     const host = `${req.protocol}://${req.get('host')}`;
     res.json({
       id: song.id,
-      name: song.name,
+      name: toTitleCase(song.name), // Title Case song name on fetch
       nameSinhala: song.nameSinhala,
       status: (song.status === 1 || song.status === true || song.status === '1') ? 'Active' : 'Inactive',
       isrcCode: song.isrcCode,
@@ -347,11 +504,13 @@ exports.getSongById = async (req, res) => {
       versionType: song.versionType,
       versionName: song.versionName,
       originalSongId: song.originalSongId,
-      distributionProvider: song.distributionProvider,
-      ringtoneProvider: song.ringtoneProvider,
-      ringtoneId: song.ringtoneId,
-      contentCode: song.contentCode,
-      addedDate: song.addedDate ? song.addedDate.toISOString().split('T')[0] : null,
+      distributionProvider: activeDist ? toTitleCase(activeDist.company_name) : null,
+      distributorId: activeDist ? String(activeDist.distributor_id) : null,
+      ringtoneProvider: activeRing ? activeRing.name : null,
+      ringtoneId: activeRing ? activeRing.ringtone_code : null,
+      contentCode: activeRing ? activeRing.content_code : null,
+      addedDate: activeRing && activeRing.added_date ? activeRing.added_date.toISOString().split('T')[0] : null,
+      ringintoneId: activeRing ? String(activeRing.ringintone_id) : null,
       trackUrl: song.trackUrl ? (song.trackUrl.startsWith('http') ? song.trackUrl : `${host}${song.trackUrl}`) : null,
       imageUrl: song.imageUrl ? (song.imageUrl.startsWith('http') ? song.imageUrl : `${host}${song.imageUrl}`) : null,
       singers: singers.map(s => String(s.artist_id)),
@@ -383,13 +542,23 @@ exports.updateSong = async (req, res) => {
     }
     const currentSong = existingSongs[0];
 
-    const name = (req.body.name || currentSong.name).trim();
+    // Save song name as simple letters (lowercase)
+    const name = (req.body.name || currentSong.name).trim().toLowerCase();
     const nameSinhala = (req.body.nameSinhala || currentSong.nameSinhala).trim();
     const isrcCode = req.body.isrcCode !== undefined ? req.body.isrcCode.trim() : currentSong.isrcCode;
     const other = req.body.other !== undefined ? req.body.other.trim() : currentSong.other;
     const versionType = req.body.versionType !== undefined ? req.body.versionType : currentSong.versionType;
 
-    // Parse uploaded files (if any). If not, fallback to existing paths
+    if (!isrcCode) {
+      return res.status(400).json({ message: 'ISRC Code is required' });
+    }
+
+    // Verify ISRC uniqueness
+    const [existingIsrc] = await pool.query('SELECT id FROM songs WHERE isrcCode = ? AND id != ?', [isrcCode, songId]);
+    if (existingIsrc.length > 0) {
+      return res.status(400).json({ message: 'ISRC Code already exists. It must be unique.' });
+    }
+
     const trackFile = req.files && req.files['track'] ? req.files['track'][0] : null;
     const artFile = req.files && req.files['art'] ? req.files['art'][0] : null;
 
@@ -402,10 +571,12 @@ exports.updateSong = async (req, res) => {
       imageUrl = `/uploads/images/${artFile.filename}`;
     }
 
-    // Parse options structures
     let versionName = currentSong.versionName;
     let originalSongId = currentSong.originalSongId;
-    if (req.body.versionDetails) {
+    if (versionType !== 'Version') {
+      versionName = null;
+      originalSongId = null;
+    } else if (req.body.versionDetails) {
       try {
         const details = typeof req.body.versionDetails === 'string' ? JSON.parse(req.body.versionDetails) : req.body.versionDetails;
         versionName = details.versionName;
@@ -413,46 +584,6 @@ exports.updateSong = async (req, res) => {
       } catch (e) {
         console.warn('Failed to parse versionDetails:', e.message);
       }
-    }
-
-    let distributionProvider = currentSong.distributionProvider;
-    if (req.body.distribution) {
-      try {
-        const dist = typeof req.body.distribution === 'string' ? JSON.parse(req.body.distribution) : req.body.distribution;
-        distributionProvider = dist ? dist.provider : null;
-      } catch (e) {
-        console.warn('Failed to parse distribution:', e.message);
-      }
-    } else if (req.body.distribution === null || req.body.distribution === 'null') {
-      distributionProvider = null;
-    }
-
-    let ringtoneProvider = currentSong.ringtoneProvider;
-    let ringtoneId = currentSong.ringtoneId;
-    let contentCode = currentSong.contentCode;
-    let addedDate = currentSong.addedDate;
-    if (req.body.ringtone) {
-      try {
-        const rt = typeof req.body.ringtone === 'string' ? JSON.parse(req.body.ringtone) : req.body.ringtone;
-        if (rt) {
-          ringtoneProvider = rt.provider;
-          ringtoneId = rt.ringtoneId;
-          contentCode = rt.contentCode;
-          addedDate = rt.addedDate && rt.addedDate.trim() !== '' ? rt.addedDate : null;
-        } else {
-          ringtoneProvider = null;
-          ringtoneId = null;
-          contentCode = null;
-          addedDate = null;
-        }
-      } catch (e) {
-        console.warn('Failed to parse ringtone:', e.message);
-      }
-    } else if (req.body.ringtone === null || req.body.ringtone === 'null') {
-      ringtoneProvider = null;
-      ringtoneId = null;
-      contentCode = null;
-      addedDate = null;
     }
 
     // Parse role arrays
@@ -471,8 +602,7 @@ exports.updateSong = async (req, res) => {
     await pool.query(
       `UPDATE songs SET 
         name = ?, nameSinhala = ?, trackUrl = ?, imageUrl = ?, isrcCode = ?, other = ?, 
-        versionType = ?, versionName = ?, originalSongId = ?, distributionProvider = ?, 
-        ringtoneProvider = ?, ringtoneId = ?, contentCode = ?, addedDate = ?
+        versionType = ?, versionName = ?, originalSongId = ?
       WHERE id = ?`,
       [
         name,
@@ -484,21 +614,15 @@ exports.updateSong = async (req, res) => {
         versionType,
         versionName,
         originalSongId,
-        distributionProvider,
-        ringtoneProvider,
-        ringtoneId,
-        contentCode,
-        addedDate,
         songId
       ]
     );
 
-    // Rebuild relationship mapping tables (delete existing first, then insert new ones)
+    // Rebuild artist relationships
     await pool.query('DELETE FROM songSinger WHERE song_id = ?', [songId]);
     await pool.query('DELETE FROM songLyrics WHERE song_id = ?', [songId]);
     await pool.query('DELETE FROM songmusician WHERE song_id = ?', [songId]);
 
-    // Helper to insert relationships into separate many-to-many tables
     const insertRelations = async (artistIds, tableName) => {
       for (const idVal of artistIds) {
         let artistId = parseInt(idVal, 10);
@@ -507,7 +631,7 @@ exports.updateSong = async (req, res) => {
           if (artist.length > 0) {
             artistId = artist[0].id;
           } else {
-            continue; // Skip if artist doesn't exist
+            continue;
           }
         }
         await pool.query(
@@ -521,7 +645,69 @@ exports.updateSong = async (req, res) => {
     if (Array.isArray(lyricists)) await insertRelations(lyricists, 'songLyrics');
     if (Array.isArray(musicians)) await insertRelations(musicians, 'songmusician');
 
-    // Get list of names and IDs for returning representation
+    // 3. Save distributor mapping
+    let distributorId = null;
+    let distributionProvider = null;
+    if (req.body.distribution) {
+      try {
+        const dist = typeof req.body.distribution === 'string' ? JSON.parse(req.body.distribution) : req.body.distribution;
+        distributorId = dist ? (dist.provider && !isNaN(dist.provider) ? parseInt(dist.provider, 10) : null) : null;
+      } catch (e) {
+        console.warn('Failed to parse distribution:', e.message);
+      }
+    }
+
+    if (distributorId) {
+      await pool.query('UPDATE songdistributor SET status = 0 WHERE song_id = ?', [songId]);
+      await pool.query(
+        'INSERT INTO songdistributor (song_id, distributor_id, status) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE status = 1',
+        [songId, distributorId]
+      );
+      const [distNameRows] = await pool.query('SELECT company_name FROM distributors WHERE id = ?', [distributorId]);
+      if (distNameRows.length > 0) {
+        distributionProvider = toTitleCase(distNameRows[0].company_name);
+      }
+    } else if (req.body.distribution === null || req.body.distribution === 'null') {
+      await pool.query('UPDATE songdistributor SET status = 0 WHERE song_id = ?', [songId]);
+    }
+
+    // 4. Save ringtone mapping
+    let ringintoneId = null;
+    let ringtoneProvider = null;
+    let ringtoneId = null;
+    let contentCode = null;
+    let addedDate = null;
+    if (req.body.ringtone) {
+      try {
+        const rt = typeof req.body.ringtone === 'string' ? JSON.parse(req.body.ringtone) : req.body.ringtone;
+        if (rt) {
+          ringintoneId = rt.provider && !isNaN(rt.provider) ? parseInt(rt.provider, 10) : null;
+          ringtoneId = rt.ringtoneId;
+          contentCode = rt.contentCode;
+          addedDate = rt.addedDate && rt.addedDate.trim() !== '' ? rt.addedDate : null;
+        }
+      } catch (e) {
+        console.warn('Failed to parse ringtone:', e.message);
+      }
+    }
+
+    if (ringintoneId) {
+      await pool.query('UPDATE songringintone SET status = 0 WHERE song_id = ?', [songId]);
+      const slTimestamp = getSriLankaTimestamp();
+      await pool.query(
+        `INSERT INTO songringintone (song_id, ringintone_id, status, ringtone_code, content_code, added_date) 
+         VALUES (?, ?, 1, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE status = 1, ringtone_code = ?, content_code = ?, added_date = ?`,
+        [songId, ringintoneId, ringtoneId, contentCode, slTimestamp, ringtoneId, contentCode, slTimestamp]
+      );
+      const [ringNameRows] = await pool.query('SELECT name FROM ringintone WHERE id = ?', [ringintoneId]);
+      if (ringNameRows.length > 0) {
+        ringtoneProvider = toTitleCase(ringNameRows[0].name);
+      }
+    } else if (req.body.ringtone === null || req.body.ringtone === 'null') {
+      await pool.query('UPDATE songringintone SET status = 0 WHERE song_id = ?', [songId]);
+    }
+
     const getArtistDetailsByRole = async (tableName) => {
       const [artists] = await pool.query(`
         SELECT a.id, a.name FROM ${tableName} t 
@@ -539,7 +725,7 @@ exports.updateSong = async (req, res) => {
 
     res.json({
       id: songId,
-      name,
+      name: toTitleCase(name), // Return Title Case
       nameSinhala,
       status: (currentSong.status === 1 || currentSong.status === true || currentSong.status === '1') ? 'Active' : 'Inactive',
       artist: singersData.length > 0 ? singersData.map(s => s.name).join(', ') : 'None',
@@ -552,11 +738,15 @@ exports.updateSong = async (req, res) => {
       versionType: versionType || 'Original',
       versionName,
       originalSongId,
+      isrcCode,
+      other,
       distributionProvider,
+      distributorId: distributorId ? String(distributorId) : null,
       ringtoneProvider,
       ringtoneId,
       contentCode,
       addedDate,
+      ringintoneId: ringintoneId ? String(ringintoneId) : null,
       trackUrl: trackUrl ? (trackUrl.startsWith('http') ? trackUrl : `${host}${trackUrl}`) : null,
       imageUrl: imageUrl ? (imageUrl.startsWith('http') ? imageUrl : `${host}${imageUrl}`) : null,
       singers: singersData.map(s => String(s.id)),

@@ -3,6 +3,8 @@ const cors = require('cors');
 const path = require('path');
 const artistRoutes = require('./routes/artistRoutes');
 const songRoutes = require('./routes/songRoutes');
+const distributorRoutes = require('./routes/distributorRoutes');
+const ringtoneRoutes = require('./routes/ringtoneRoutes');
 
 const app = express();
 
@@ -19,6 +21,8 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 // Routes
 app.use('/api/artists', artistRoutes);
 app.use('/api/songs', songRoutes);
+app.use('/api/distributors', distributorRoutes);
+app.use('/api/ringtones', ringtoneRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

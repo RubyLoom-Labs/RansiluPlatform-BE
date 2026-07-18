@@ -319,38 +319,58 @@ exports.createSong = async (req, res) => {
       }
     }
 
-    // 2. Save ringtone mapping
-    let ringintoneId = null;
-    let ringtoneProvider = null;
-    let ringtoneId = null;
-    let contentCode = null;
-    let addedDate = null;
-    if (req.body.ringtone) {
+    // 2. Save ringtone mappings (multiple)
+    let savedRingtones = [];
+    if (req.body.ringtones) {
       try {
-        const rt = typeof req.body.ringtone === 'string' ? JSON.parse(req.body.ringtone) : req.body.ringtone;
-        if (rt) {
-          ringintoneId = rt.provider && !isNaN(rt.provider) ? parseInt(rt.provider, 10) : null;
-          ringtoneId = rt.ringtoneId;
-          contentCode = rt.contentCode;
-          addedDate = rt.addedDate && rt.addedDate.trim() !== '' ? rt.addedDate : null;
+        const rtArray = typeof req.body.ringtones === 'string' ? JSON.parse(req.body.ringtones) : req.body.ringtones;
+        if (Array.isArray(rtArray) && rtArray.length > 0) {
+          // Validate: each entry must have provider, ringtoneCode, contentCode
+          for (let i = 0; i < rtArray.length; i++) {
+            const entry = rtArray[i];
+            if (!entry.provider || isNaN(entry.provider)) {
+              return res.status(400).json({ message: `Ringtone entry ${i + 1}: Provider is required` });
+            }
+            if (!entry.ringtoneCode || !entry.ringtoneCode.trim()) {
+              return res.status(400).json({ message: `Ringtone entry ${i + 1}: Ringtone Code is required` });
+            }
+            if (!entry.contentCode || !entry.contentCode.trim()) {
+              return res.status(400).json({ message: `Ringtone entry ${i + 1}: Content Code is required` });
+            }
+          }
+
+          // Check for duplicate providers
+          const providerIds = rtArray.map(r => parseInt(r.provider, 10));
+          const uniqueProviders = new Set(providerIds);
+          if (uniqueProviders.size !== providerIds.length) {
+            return res.status(400).json({ message: 'Duplicate ringtone providers are not allowed. Each provider can only be added once.' });
+          }
+
+          // Deactivate any existing and insert all
+          await pool.query('UPDATE songringintone SET status = 0 WHERE song_id = ?', [songId]);
+          const slTimestamp = getSriLankaTimestamp();
+
+          for (const entry of rtArray) {
+            const providerId = parseInt(entry.provider, 10);
+            await pool.query(
+              `INSERT INTO songringintone (song_id, ringintone_id, status, ringtone_code, content_code, added_date) 
+               VALUES (?, ?, 1, ?, ?, ?)
+               ON DUPLICATE KEY UPDATE status = 1, ringtone_code = ?, content_code = ?, added_date = ?`,
+              [songId, providerId, entry.ringtoneCode.trim(), entry.contentCode.trim(), slTimestamp, entry.ringtoneCode.trim(), entry.contentCode.trim(), slTimestamp]
+            );
+            const [ringNameRows] = await pool.query('SELECT name FROM ringintone WHERE id = ?', [providerId]);
+            savedRingtones.push({
+              ringintoneId: String(providerId),
+              ringtoneProvider: ringNameRows.length > 0 ? toTitleCase(ringNameRows[0].name) : null,
+              ringtoneCode: entry.ringtoneCode.trim(),
+              contentCode: entry.contentCode.trim(),
+              addedDate: slTimestamp
+            });
+          }
         }
       } catch (e) {
-        console.warn('Failed to parse ringtone:', e.message);
-      }
-    }
-
-    if (ringintoneId) {
-      await pool.query('UPDATE songringintone SET status = 0 WHERE song_id = ?', [songId]);
-      const slTimestamp = getSriLankaTimestamp();
-      await pool.query(
-        `INSERT INTO songringintone (song_id, ringintone_id, status, ringtone_code, content_code, added_date) 
-         VALUES (?, ?, 1, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE status = 1, ringtone_code = ?, content_code = ?, added_date = ?`,
-        [songId, ringintoneId, ringtoneId, contentCode, slTimestamp, ringtoneId, contentCode, slTimestamp]
-      );
-      const [ringNameRows] = await pool.query('SELECT name FROM ringintone WHERE id = ?', [ringintoneId]);
-      if (ringNameRows.length > 0) {
-        ringtoneProvider = toTitleCase(ringNameRows[0].name);
+        if (e.message && e.message.includes('Ringtone entry')) throw e;
+        console.warn('Failed to parse ringtones:', e.message);
       }
     }
 
@@ -373,9 +393,12 @@ exports.createSong = async (req, res) => {
 
     const host = `${req.protocol}://${req.get('host')}`;
 
+    // Backward compat: first ringtone entry as flat fields
+    const firstRing = savedRingtones.length > 0 ? savedRingtones[0] : null;
+
     res.status(201).json({
       id: songId,
-      name: toTitleCase(lowercaseName), // Return Title Case
+      name: toTitleCase(lowercaseName),
       nameSinhala,
       status: 'Active',
       artist: singerNames.length > 0 ? singerNames.join(', ') : 'None',
@@ -392,11 +415,12 @@ exports.createSong = async (req, res) => {
       other: other || '',
       distributionProvider,
       distributorId: distributorId ? String(distributorId) : null,
-      ringtoneProvider,
-      ringtoneId,
-      contentCode,
-      addedDate,
-      ringintoneId: ringintoneId ? String(ringintoneId) : null,
+      ringtoneProvider: firstRing ? firstRing.ringtoneProvider : null,
+      ringtoneId: firstRing ? firstRing.ringtoneCode : null,
+      contentCode: firstRing ? firstRing.contentCode : null,
+      addedDate: firstRing ? firstRing.addedDate : null,
+      ringintoneId: firstRing ? firstRing.ringintoneId : null,
+      ringtones: savedRingtones,
       trackUrl: `${host}${trackUrl}`,
       imageUrl: `${host}${imageUrl}`,
       createdAt: new Date(),
@@ -484,13 +508,23 @@ exports.getSongById = async (req, res) => {
     `, [songId]);
     const activeDist = distRows[0] || null;
 
-    // Fetch active ringtone
+    // Fetch active ringtones (multiple)
     const [ringRows] = await pool.query(`
       SELECT sr.ringintone_id, r.name, sr.ringtone_code, sr.content_code, sr.added_date
       FROM songringintone sr
       JOIN ringintone r ON sr.ringintone_id = r.id
       WHERE sr.song_id = ? AND sr.status = 1
     `, [songId]);
+
+    const ringtones = ringRows.map(ring => ({
+      ringintoneId: String(ring.ringintone_id),
+      ringtoneProvider: toTitleCase(ring.name),
+      ringtoneCode: ring.ringtone_code || '',
+      contentCode: ring.content_code || '',
+      addedDate: ring.added_date ? (typeof ring.added_date === 'object' ? ring.added_date.toISOString().split('T')[0] : String(ring.added_date).split('T')[0]) : null
+    }));
+
+    // Backward compat: first ringtone entry as flat fields
     const activeRing = ringRows[0] || null;
 
     const host = `${req.protocol}://${req.get('host')}`;
@@ -509,8 +543,9 @@ exports.getSongById = async (req, res) => {
       ringtoneProvider: activeRing ? activeRing.name : null,
       ringtoneId: activeRing ? activeRing.ringtone_code : null,
       contentCode: activeRing ? activeRing.content_code : null,
-      addedDate: activeRing && activeRing.added_date ? activeRing.added_date.toISOString().split('T')[0] : null,
+      addedDate: activeRing && activeRing.added_date ? (typeof activeRing.added_date === 'object' ? activeRing.added_date.toISOString().split('T')[0] : String(activeRing.added_date).split('T')[0]) : null,
       ringintoneId: activeRing ? String(activeRing.ringintone_id) : null,
+      ringtones,
       trackUrl: song.trackUrl ? (song.trackUrl.startsWith('http') ? song.trackUrl : `${host}${song.trackUrl}`) : null,
       imageUrl: song.imageUrl ? (song.imageUrl.startsWith('http') ? song.imageUrl : `${host}${song.imageUrl}`) : null,
       singers: singers.map(s => String(s.artist_id)),
@@ -671,40 +706,61 @@ exports.updateSong = async (req, res) => {
       await pool.query('UPDATE songdistributor SET status = 0 WHERE song_id = ?', [songId]);
     }
 
-    // 4. Save ringtone mapping
-    let ringintoneId = null;
-    let ringtoneProvider = null;
-    let ringtoneId = null;
-    let contentCode = null;
-    let addedDate = null;
-    if (req.body.ringtone) {
+    // 4. Save ringtone mappings (multiple)
+    let savedRingtones = [];
+    if (req.body.ringtones) {
       try {
-        const rt = typeof req.body.ringtone === 'string' ? JSON.parse(req.body.ringtone) : req.body.ringtone;
-        if (rt) {
-          ringintoneId = rt.provider && !isNaN(rt.provider) ? parseInt(rt.provider, 10) : null;
-          ringtoneId = rt.ringtoneId;
-          contentCode = rt.contentCode;
-          addedDate = rt.addedDate && rt.addedDate.trim() !== '' ? rt.addedDate : null;
+        const rtArray = typeof req.body.ringtones === 'string' ? JSON.parse(req.body.ringtones) : req.body.ringtones;
+        if (Array.isArray(rtArray) && rtArray.length > 0) {
+          // Validate: each entry must have provider, ringtoneCode, contentCode
+          for (let i = 0; i < rtArray.length; i++) {
+            const entry = rtArray[i];
+            if (!entry.provider || isNaN(entry.provider)) {
+              return res.status(400).json({ message: `Ringtone entry ${i + 1}: Provider is required` });
+            }
+            if (!entry.ringtoneCode || !entry.ringtoneCode.trim()) {
+              return res.status(400).json({ message: `Ringtone entry ${i + 1}: Ringtone Code is required` });
+            }
+            if (!entry.contentCode || !entry.contentCode.trim()) {
+              return res.status(400).json({ message: `Ringtone entry ${i + 1}: Content Code is required` });
+            }
+          }
+
+          // Check for duplicate providers
+          const providerIds = rtArray.map(r => parseInt(r.provider, 10));
+          const uniqueProviders = new Set(providerIds);
+          if (uniqueProviders.size !== providerIds.length) {
+            return res.status(400).json({ message: 'Duplicate ringtone providers are not allowed. Each provider can only be added once.' });
+          }
+
+          // Deactivate all existing and insert all new
+          await pool.query('UPDATE songringintone SET status = 0 WHERE song_id = ?', [songId]);
+          const slTimestamp = getSriLankaTimestamp();
+
+          for (const entry of rtArray) {
+            const providerId = parseInt(entry.provider, 10);
+            await pool.query(
+              `INSERT INTO songringintone (song_id, ringintone_id, status, ringtone_code, content_code, added_date) 
+               VALUES (?, ?, 1, ?, ?, ?)
+               ON DUPLICATE KEY UPDATE status = 1, ringtone_code = ?, content_code = ?, added_date = ?`,
+              [songId, providerId, entry.ringtoneCode.trim(), entry.contentCode.trim(), slTimestamp, entry.ringtoneCode.trim(), entry.contentCode.trim(), slTimestamp]
+            );
+            const [ringNameRows] = await pool.query('SELECT name FROM ringintone WHERE id = ?', [providerId]);
+            savedRingtones.push({
+              ringintoneId: String(providerId),
+              ringtoneProvider: ringNameRows.length > 0 ? toTitleCase(ringNameRows[0].name) : null,
+              ringtoneCode: entry.ringtoneCode.trim(),
+              contentCode: entry.contentCode.trim(),
+              addedDate: slTimestamp
+            });
+          }
         }
       } catch (e) {
-        console.warn('Failed to parse ringtone:', e.message);
+        if (e.message && e.message.includes('Ringtone entry')) throw e;
+        console.warn('Failed to parse ringtones:', e.message);
       }
-    }
-
-    if (ringintoneId) {
-      await pool.query('UPDATE songringintone SET status = 0 WHERE song_id = ?', [songId]);
-      const slTimestamp = getSriLankaTimestamp();
-      await pool.query(
-        `INSERT INTO songringintone (song_id, ringintone_id, status, ringtone_code, content_code, added_date) 
-         VALUES (?, ?, 1, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE status = 1, ringtone_code = ?, content_code = ?, added_date = ?`,
-        [songId, ringintoneId, ringtoneId, contentCode, slTimestamp, ringtoneId, contentCode, slTimestamp]
-      );
-      const [ringNameRows] = await pool.query('SELECT name FROM ringintone WHERE id = ?', [ringintoneId]);
-      if (ringNameRows.length > 0) {
-        ringtoneProvider = toTitleCase(ringNameRows[0].name);
-      }
-    } else if (req.body.ringtone === null || req.body.ringtone === 'null') {
+    } else if (req.body.ringtones === null || req.body.ringtones === 'null') {
+      // Ringtone toggle was turned off — deactivate all
       await pool.query('UPDATE songringintone SET status = 0 WHERE song_id = ?', [songId]);
     }
 
@@ -723,9 +779,12 @@ exports.updateSong = async (req, res) => {
 
     const host = `${req.protocol}://${req.get('host')}`;
 
+    // Backward compat: first ringtone entry as flat fields
+    const firstRing = savedRingtones.length > 0 ? savedRingtones[0] : null;
+
     res.json({
       id: songId,
-      name: toTitleCase(name), // Return Title Case
+      name: toTitleCase(name),
       nameSinhala,
       status: (currentSong.status === 1 || currentSong.status === true || currentSong.status === '1') ? 'Active' : 'Inactive',
       artist: singersData.length > 0 ? singersData.map(s => s.name).join(', ') : 'None',
@@ -742,11 +801,12 @@ exports.updateSong = async (req, res) => {
       other,
       distributionProvider,
       distributorId: distributorId ? String(distributorId) : null,
-      ringtoneProvider,
-      ringtoneId,
-      contentCode,
-      addedDate,
-      ringintoneId: ringintoneId ? String(ringintoneId) : null,
+      ringtoneProvider: firstRing ? firstRing.ringtoneProvider : null,
+      ringtoneId: firstRing ? firstRing.ringtoneCode : null,
+      contentCode: firstRing ? firstRing.contentCode : null,
+      addedDate: firstRing ? firstRing.addedDate : null,
+      ringintoneId: firstRing ? firstRing.ringintoneId : null,
+      ringtones: savedRingtones,
       trackUrl: trackUrl ? (trackUrl.startsWith('http') ? trackUrl : `${host}${trackUrl}`) : null,
       imageUrl: imageUrl ? (imageUrl.startsWith('http') ? imageUrl : `${host}${imageUrl}`) : null,
       singers: singersData.map(s => String(s.id)),

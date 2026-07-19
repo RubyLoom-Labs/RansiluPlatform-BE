@@ -10,7 +10,7 @@ function toTitleCase(str) {
     .join(' ');
 }
 
-// Get all ringtone operators
+// Get all active ringtone operators
 exports.getRingtones = async (req, res) => {
   try {
     const pool = getPool();
@@ -18,11 +18,12 @@ exports.getRingtones = async (req, res) => {
     const page = parseInt(req.query.page, 10) || 1;
     const limit = parseInt(req.query.limit, 10) || 20;
     const offset = (page - 1) * limit;
+    const isExport = req.query.export === 'true';
 
     const search = req.query.search || '';
-    const status = req.query.status;
 
-    let whereClauses = [];
+    // Enforce status = 1 filter
+    let whereClauses = ['r.status = 1'];
     let queryParams = [];
 
     if (search) {
@@ -30,17 +31,7 @@ exports.getRingtones = async (req, res) => {
       queryParams.push(`%${search}%`);
     }
 
-    if (status !== undefined) {
-      whereClauses.push('r.status = ?');
-      const isStatusActive = 
-        status === 'true' || 
-        status === true || 
-        String(status).toLowerCase() === 'active' || 
-        String(status) === '1';
-      queryParams.push(isStatusActive ? 1 : 0);
-    }
-
-    const whereClauseStr = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+    const whereClauseStr = 'WHERE ' + whereClauses.join(' AND ');
 
     // Count
     const [countRows] = await pool.query(
@@ -49,17 +40,23 @@ exports.getRingtones = async (req, res) => {
     );
     const totalCount = countRows[0].total;
 
-    // Fetch records
+    // Fetch records (Distinct song count)
     let dataQuery = `
-      SELECT r.*, COUNT(sr.song_id) as songCount
+      SELECT r.*, COUNT(DISTINCT sr.song_id) as songCount
       FROM ringintone r
       LEFT JOIN songringintone sr ON r.id = sr.ringintone_id AND sr.status = 1
       ${whereClauseStr}
       GROUP BY r.id
-      ORDER BY r.id DESC
-      LIMIT ? OFFSET ?
+      ORDER BY r.name ASC
     `;
-    const [rows] = await pool.query(dataQuery, [...queryParams, limit, offset]);
+
+    let rows;
+    if (isExport) {
+      [rows] = await pool.query(dataQuery, queryParams);
+    } else {
+      dataQuery += ` LIMIT ? OFFSET ?`;
+      [rows] = await pool.query(dataQuery, [...queryParams, limit, offset]);
+    }
 
     const host = `${req.protocol}://${req.get('host')}`;
 
@@ -69,7 +66,7 @@ exports.getRingtones = async (req, res) => {
         name: toTitleCase(r.name),
         shortName: toTitleCase(r.name).split(' ')[0],
         logo: r.company_logo ? (r.company_logo.startsWith('http') ? r.company_logo : `${host}${r.company_logo}`) : null,
-        status: r.status === 1 || r.status === true ? 'Active' : 'Inactive',
+        status: 'Active',
         songCount: r.songCount || 0
       })),
       totalCount
@@ -80,13 +77,13 @@ exports.getRingtones = async (req, res) => {
   }
 };
 
-// Get single ringtone operator
+// Get single active ringtone operator
 exports.getRingtoneById = async (req, res) => {
   try {
     const pool = getPool();
     const { id } = req.params;
 
-    const [rows] = await pool.query('SELECT * FROM ringintone WHERE id = ?', [id]);
+    const [rows] = await pool.query('SELECT * FROM ringintone WHERE id = ? AND status = 1', [id]);
     if (rows.length === 0) {
       return res.status(404).json({ message: 'Operator not found' });
     }
@@ -99,7 +96,7 @@ exports.getRingtoneById = async (req, res) => {
       name: toTitleCase(r.name),
       shortName: toTitleCase(r.name).split(' ')[0],
       logo: r.company_logo ? (r.company_logo.startsWith('http') ? r.company_logo : `${host}${r.company_logo}`) : null,
-      status: r.status === 1 || r.status === true ? 'Active' : 'Inactive'
+      status: 'Active'
     });
   } catch (error) {
     console.error('Error fetching ringtone by ID:', error);
@@ -183,7 +180,10 @@ exports.updateRingtone = async (req, res) => {
       company_logo = `/uploads/images/${req.file.filename}`;
     }
 
-    const dbStatus = status === 'Active' || status === true || status === 1 || status === '1' ? 1 : 0;
+    let dbStatus = existing[0].status;
+    if (status !== undefined) {
+      dbStatus = status === 'Active' || status === true || status === 1 || status === '1' ? 1 : 0;
+    }
 
     await pool.query(
       `UPDATE ringintone 
@@ -206,3 +206,128 @@ exports.updateRingtone = async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+// Delete ringtone operator with dependencies check
+exports.deleteRingtone = async (req, res) => {
+  try {
+    const pool = getPool();
+    const id = parseInt(req.params.id, 10);
+    const force = req.query.force === 'true' || req.body.force === true;
+
+    if (isNaN(id)) {
+      return res.status(400).json({ message: 'Invalid operator ID' });
+    }
+
+    // Check active SongRingtone dependencies
+    const [dependencies] = await pool.query(
+      `SELECT s.id, s.name, 
+              (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id = s.id) as artist,
+              '—' as album
+       FROM songringintone sr
+       JOIN songs s ON sr.song_id = s.id
+       WHERE sr.ringintone_id = ? AND sr.status = 1 AND s.status = 1`,
+      [id]
+    );
+
+    if (dependencies.length > 0 && !force) {
+      return res.json({
+        success: false,
+        hasDependencies: true,
+        dependentSongs: dependencies.map(row => ({
+          id: row.id,
+          name: toTitleCase(row.name),
+          artist: toTitleCase(row.artist) || 'Unknown Artist',
+          album: '—'
+        }))
+      });
+    }
+
+    // Soft delete ringtone operator
+    await pool.query('UPDATE ringintone SET status = 0 WHERE id = ?', [id]);
+
+    // Soft delete song relationships
+    await pool.query('UPDATE songringintone SET status = 0 WHERE ringintone_id = ?', [id]);
+
+    res.json({
+      success: true,
+      hasDependencies: false
+    });
+  } catch (error) {
+    console.error('Error deleting ringtone:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// Get songs mapping to selected ringtone
+exports.getRingtoneSongs = async (req, res) => {
+  try {
+    const pool = getPool();
+    const ringtoneId = parseInt(req.params.id, 10);
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 20;
+    const offset = (page - 1) * limit;
+    const isExport = req.query.export === 'true';
+
+    if (isNaN(ringtoneId)) {
+      return res.status(400).json({ message: 'Invalid operator ID' });
+    }
+
+    // Check total count of active songs mapping to this ringtone
+    const [countRows] = await pool.query(
+      `SELECT COUNT(*) as total
+       FROM songringintone sr
+       JOIN songs s ON sr.song_id = s.id
+       WHERE sr.ringintone_id = ? AND sr.status = 1 AND s.status = 1`,
+      [ringtoneId]
+    );
+    const totalCount = countRows[0].total;
+
+    // Fetch songs, active distributor, and distinct singers, lyricists, musicians
+    let dataQuery = `
+      SELECT s.id, s.name, sr.added_date as release_date,
+             (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id = s.id) as artist,
+             (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songLyrics sl JOIN artists a ON sl.artist_id = a.id WHERE sl.song_id = s.id) as lyricist,
+             (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songmusician sm JOIN artists a ON sm.artist_id = a.id WHERE sm.song_id = s.id) as musician,
+             '—' as album,
+             dist.company_name as distributor,
+             s.isrcCode,
+             s.versionType,
+             s.ownership
+      FROM songringintone sr
+      JOIN songs s ON sr.song_id = s.id
+      LEFT JOIN songdistributor sd ON s.id = sd.song_id AND sd.status = 1
+      LEFT JOIN distributors dist ON sd.distributor_id = dist.id
+      WHERE sr.ringintone_id = ? AND sr.status = 1 AND s.status = 1
+      ORDER BY s.name ASC
+    `;
+
+    let rows;
+    if (isExport) {
+      [rows] = await pool.query(dataQuery, [ringtoneId]);
+    } else {
+      dataQuery += ` LIMIT ? OFFSET ?`;
+      [rows] = await pool.query(dataQuery, [ringtoneId, limit, offset]);
+    }
+
+    res.json({
+      songs: rows.map(s => ({
+        id: s.id,
+        name: toTitleCase(s.name),
+        artist: toTitleCase(s.artist) || 'Unknown Artist',
+        lyrics: toTitleCase(s.lyricist) || '—',
+        music: toTitleCase(s.musician) || '—',
+        album: s.album || '—',
+        distributor: toTitleCase(s.distributor) || '—',
+        releaseDate: s.release_date ? (typeof s.release_date === 'object' ? s.release_date.toISOString().split('T')[0] : String(s.release_date).split('T')[0]) : '—',
+        isrcCode: s.isrcCode || '—',
+        versionType: s.versionType || 'Original',
+        ownership: s.ownership || 100
+      })),
+      totalCount
+    });
+  } catch (error) {
+    console.error('Error fetching ringtone songs:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+

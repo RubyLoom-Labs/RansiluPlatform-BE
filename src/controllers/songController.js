@@ -25,11 +25,16 @@ exports.getSongs = async (req, res) => {
     
     // Parse query parameters
     const page = req.query.page ? parseInt(req.query.page, 10) : null;
-    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 10;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 20;
     const offset = page ? (page - 1) * limit : 0;
+    const isExport = req.query.export === 'true';
     
     const search = req.query.search || '';
     const versionType = req.query.versionType || '';
+    const statusFilter = req.query.status || '';
+    const conflictFilter = req.query.conflict || '';
+    const ownershipFilter = req.query.ownership || '';
+    const sort = req.query.sort || 'Songs A-Z';
     const excludeId = req.query.excludeId ? parseInt(req.query.excludeId, 10) : null;
     
     // Build WHERE clauses
@@ -37,17 +42,44 @@ exports.getSongs = async (req, res) => {
     let queryParams = [];
     
     if (search) {
-      whereClauses.push('(name LIKE ? OR nameSinhala LIKE ?)');
-      queryParams.push(`%${search}%`, `%${search}%`);
+      whereClauses.push(
+        `(songs.name LIKE ? OR songs.nameSinhala LIKE ? 
+          OR EXISTS (SELECT 1 FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id = songs.id AND a.name LIKE ?)
+          OR EXISTS (SELECT 1 FROM songLyrics sl JOIN artists a ON sl.artist_id = a.id WHERE sl.song_id = songs.id AND a.name LIKE ?)
+          OR EXISTS (SELECT 1 FROM songmusician sm JOIN artists a ON sm.artist_id = a.id WHERE sm.song_id = songs.id AND a.name LIKE ?))`
+      );
+      const searchPattern = `%${search}%`;
+      queryParams.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
     }
     
     if (versionType) {
-      whereClauses.push('versionType = ?');
+      whereClauses.push('songs.versionType = ?');
       queryParams.push(versionType);
     }
 
+    if (statusFilter) {
+      whereClauses.push('songs.status = ?');
+      queryParams.push(statusFilter === 'Active' ? 1 : 0);
+    }
+
+    if (conflictFilter) {
+      if (conflictFilter === 'Yes') {
+        whereClauses.push("(songs.conflict = 'Yes' OR songs.notes LIKE '%conflict%' OR songs.notes LIKE '%review%')");
+      } else {
+        whereClauses.push("(songs.conflict != 'Yes' AND songs.notes NOT LIKE '%conflict%' AND songs.notes NOT LIKE '%review%')");
+      }
+    }
+
+    if (ownershipFilter) {
+      if (ownershipFilter === 'High') {
+        whereClauses.push('songs.ownership >= 50');
+      } else {
+        whereClauses.push('songs.ownership < 50');
+      }
+    }
+
     if (excludeId) {
-      whereClauses.push('id != ?');
+      whereClauses.push('songs.id != ?');
       queryParams.push(excludeId);
     }
     
@@ -55,22 +87,30 @@ exports.getSongs = async (req, res) => {
     
     // Fetch total count if paginated
     let totalCount = 0;
-    if (page) {
+    if (page && !isExport) {
       const [countRows] = await pool.query(`SELECT COUNT(*) as total FROM songs ${whereClauseStr}`, queryParams);
       totalCount = countRows[0].total;
     }
     
+    // Sorting order
+    let orderClause = 'ORDER BY songs.name ASC'; // Default to alphabetical order
+    if (sort === 'Artists A-Z') {
+      orderClause = 'ORDER BY (SELECT a.name FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id = songs.id LIMIT 1) ASC';
+    } else if (sort === 'Recently Added') {
+      orderClause = 'ORDER BY songs.created_at DESC, songs.id DESC';
+    }
+    
     // Fetch records
-    let dataQuery = `SELECT * FROM songs ${whereClauseStr} ORDER BY id DESC`;
+    let dataQuery = `SELECT * FROM songs ${whereClauseStr} ${orderClause}`;
     let queryParamsForData = [...queryParams];
-    if (page) {
+    if (page && !isExport) {
       dataQuery += ' LIMIT ? OFFSET ?';
       queryParamsForData.push(limit, offset);
     }
     
     const [songs] = await pool.query(dataQuery, queryParamsForData);
     if (songs.length === 0) {
-      return res.json(page ? { songs: [], totalCount: 0 } : []);
+      return res.json((page && !isExport) ? { songs: [], totalCount: 0 } : []);
     }
 
     const songIds = songs.map((s) => s.id);
@@ -176,7 +216,7 @@ exports.getSongs = async (req, res) => {
       };
     });
 
-    if (page) {
+    if (page && !isExport) {
       res.json({ songs: formattedSongs, totalCount });
     } else {
       res.json(formattedSongs);
@@ -308,9 +348,9 @@ exports.createSong = async (req, res) => {
     }
 
     if (distributorId) {
-      await pool.query('UPDATE songdistributor SET status = 0 WHERE song_id = ?', [songId]);
+      await pool.query('UPDATE songdistributor SET status = 0, updated_date = NOW() WHERE song_id = ?', [songId]);
       await pool.query(
-        'INSERT INTO songdistributor (song_id, distributor_id, status) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE status = 1',
+        'INSERT INTO songdistributor (song_id, distributor_id, status, updated_date) VALUES (?, ?, 1, NOW()) ON DUPLICATE KEY UPDATE status = 1, updated_date = NOW()',
         [songId, distributorId]
       );
       const [distNameRows] = await pool.query('SELECT company_name FROM distributors WHERE id = ?', [distributorId]);
@@ -693,9 +733,9 @@ exports.updateSong = async (req, res) => {
     }
 
     if (distributorId) {
-      await pool.query('UPDATE songdistributor SET status = 0 WHERE song_id = ?', [songId]);
+      await pool.query('UPDATE songdistributor SET status = 0, updated_date = NOW() WHERE song_id = ?', [songId]);
       await pool.query(
-        'INSERT INTO songdistributor (song_id, distributor_id, status) VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE status = 1',
+        'INSERT INTO songdistributor (song_id, distributor_id, status, updated_date) VALUES (?, ?, 1, NOW()) ON DUPLICATE KEY UPDATE status = 1, updated_date = NOW()',
         [songId, distributorId]
       );
       const [distNameRows] = await pool.query('SELECT company_name FROM distributors WHERE id = ?', [distributorId]);
@@ -703,7 +743,7 @@ exports.updateSong = async (req, res) => {
         distributionProvider = toTitleCase(distNameRows[0].company_name);
       }
     } else if (req.body.distribution === null || req.body.distribution === 'null') {
-      await pool.query('UPDATE songdistributor SET status = 0 WHERE song_id = ?', [songId]);
+      await pool.query('UPDATE songdistributor SET status = 0, updated_date = NOW() WHERE song_id = ?', [songId]);
     }
 
     // 4. Save ringtone mappings (multiple)
@@ -818,3 +858,408 @@ exports.updateSong = async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+// ─────────────────────────────────────────────────────────
+// GET /songs/:id/distributions
+// Returns ALL distributors linked to a song (active + inactive).
+// isActive: true  → status = 1 (the one active distributor)
+// isActive: false → status = 0 (previous / disabled ones)
+// ─────────────────────────────────────────────────────────
+exports.getSongDistributions = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT
+         sd.distributor_id,
+         sd.status,
+         sd.updated_date,
+         d.company_name,
+         d.email,
+         d.outgoing_percentage
+       FROM songdistributor sd
+       JOIN distributors d ON sd.distributor_id = d.id
+       WHERE sd.song_id = ?
+       ORDER BY sd.status DESC, sd.distributor_id DESC`,
+      [songId]
+    );
+
+    const distributions = rows.map((r) => {
+      let changedAt = null;
+      if (r.updated_date) {
+        changedAt = typeof r.updated_date === 'object'
+          ? r.updated_date.toISOString()
+          : String(r.updated_date);
+      }
+      return {
+        songDistributorId: `${songId}-${r.distributor_id}`,
+        distributorId: r.distributor_id,
+        company: toTitleCase(r.company_name),
+        email: r.email || '',
+        percentage: r.outgoing_percentage || 0,
+        isActive: r.status === 1 || r.status === true || r.status === '1',
+        changedAt,
+      };
+    });
+
+    res.json({ distributions });
+  } catch (error) {
+    console.error('Error fetching song distributions:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────
+// GET /songs/:id/ringtones
+// Returns active ringtones only (status = 1).
+// ─────────────────────────────────────────────────────────
+exports.getSongRingtones = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT
+         CONCAT(sr.song_id, '-', sr.ringintone_id) AS songRingtoneId,
+         sr.ringintone_id AS ringtoneId,
+         sr.ringtone_code AS ringtoneCode,
+         sr.content_code  AS contentCode,
+         sr.added_date    AS addedDate,
+         r.name           AS providerName,
+         r.company_logo   AS companyLogo
+       FROM songringintone sr
+       JOIN ringintone r ON sr.ringintone_id = r.id
+       WHERE sr.song_id = ? AND sr.status = 1
+       ORDER BY sr.ringintone_id ASC`,
+      [songId]
+    );
+
+    const host = `${req.protocol}://${req.get('host')}`;
+
+    const ringtones = rows.map((r) => {
+      const formatDate = (val) => {
+        if (!val) return null;
+        const str = typeof val === 'object' ? val.toISOString().split('T')[0] : String(val).split('T')[0];
+        return str.replace(/-/g, '.');
+      };
+      return {
+        songRingtoneId: r.songRingtoneId,
+        ringtoneId: r.ringtoneId,
+        providerName: toTitleCase(r.providerName),
+        ringtoneCode: r.ringtoneCode || '',
+        contentCode: r.contentCode || '',
+        addedDate: formatDate(r.addedDate),
+        lastUpdate: formatDate(r.addedDate), // updated_at not in schema; use added_date
+        companyLogo: r.companyLogo ? (r.companyLogo.startsWith('http') ? r.companyLogo : `${host}${r.companyLogo}`) : null,
+      };
+    });
+
+    res.json({ ringtones });
+  } catch (error) {
+    console.error('Error fetching song ringtones:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────
+// PATCH /songs/:id/ringtones/:ringtoneId/remove
+// Soft-deletes a song-ringtone link by setting status = 0.
+// Does NOT delete the row.
+// ─────────────────────────────────────────────────────────
+exports.removeSongRingtone = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    const ringtoneId = parseInt(req.params.ringtoneId, 10);
+
+    if (isNaN(songId) || isNaN(ringtoneId)) {
+      return res.status(400).json({ message: 'Invalid song ID or ringtone ID' });
+    }
+
+    const [result] = await pool.query(
+      'UPDATE songringintone SET status = 0 WHERE song_id = ? AND ringintone_id = ?',
+      [songId, ringtoneId]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: 'Song ringtone record not found' });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error removing song ringtone:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────
+// GET /songs/:id/versions
+// If the song is Original: returns all linked Version songs.
+// If the song is a Version: returns an empty list.
+// ─────────────────────────────────────────────────────────
+exports.getSongVersions = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+
+    // Determine the type of the current song
+    const [songRows] = await pool.query('SELECT versionType FROM songs WHERE id = ?', [songId]);
+    if (songRows.length === 0) {
+      return res.status(404).json({ message: 'Song not found' });
+    }
+
+    const versionType = songRows[0].versionType;
+
+    // Version songs cannot have their own versions
+    if (versionType !== 'Original') {
+      return res.json({ versions: [] });
+    }
+
+    // Fetch all songs that are versions of this original
+    const [versionSongs] = await pool.query(
+      `SELECT * FROM songs WHERE originalSongId = ? AND versionType = 'Version' ORDER BY id ASC`,
+      [songId]
+    );
+
+    if (versionSongs.length === 0) {
+      return res.json({ versions: [] });
+    }
+
+    const versionIds = versionSongs.map((s) => s.id);
+
+    // Fetch artist relations for these version songs
+    const [relations] = await pool.query(
+      `SELECT ss.song_id, 'singer' AS role, a.name AS artist_name
+         FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id IN (?)
+       UNION ALL
+       SELECT sl.song_id, 'lyricist' AS role, a.name AS artist_name
+         FROM songLyrics sl JOIN artists a ON sl.artist_id = a.id WHERE sl.song_id IN (?)
+       UNION ALL
+       SELECT sm.song_id, 'musician' AS role, a.name AS artist_name
+         FROM songmusician sm JOIN artists a ON sm.artist_id = a.id WHERE sm.song_id IN (?)`,
+      [versionIds, versionIds, versionIds]
+    );
+
+    // Group relations by song_id
+    const relMap = {};
+    relations.forEach((rel) => {
+      if (!relMap[rel.song_id]) relMap[rel.song_id] = { singers: [], lyricists: [], musicians: [] };
+      if (rel.role === 'singer') relMap[rel.song_id].singers.push(rel.artist_name);
+      else if (rel.role === 'lyricist') relMap[rel.song_id].lyricists.push(rel.artist_name);
+      else if (rel.role === 'musician') relMap[rel.song_id].musicians.push(rel.artist_name);
+    });
+
+    const versions = versionSongs.map((s) => {
+      const rels = relMap[s.id] || { singers: [], lyricists: [], musicians: [] };
+      return {
+        id: s.id,
+        versionName: s.versionName || toTitleCase(s.name),
+        parentSong: toTitleCase(s.name),
+        status: (s.status === 1 || s.status === true || s.status === '1') ? 'Active' : 'Inactive',
+        artist: rels.singers.length > 0 ? rels.singers.join(', ') : 'None',
+        artistSub: rels.singers.length > 1 ? 'Due - Second Artist' : '',
+        lyrics: rels.lyricists.length > 0 ? rels.lyricists.join(', ') : 'None',
+        music: rels.musicians.length > 0 ? rels.musicians.join(', ') : 'None',
+        ownership: s.ownership || 100,
+        notes: s.notes || 'No Cases Or Notes',
+        conflicts: s.conflict || 'No',
+      };
+    });
+
+    res.json({ versions });
+  } catch (error) {
+    console.error('Error fetching song versions:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────
+// POST /songs/:id/ringtones
+// Assigns/creates a new ringtone mapping for the song.
+// ─────────────────────────────────────────────────────────
+exports.addSongRingtone = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    const { providerId, ringtoneCode, contentCode } = req.body;
+
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+    if (!providerId || isNaN(parseInt(providerId, 10))) {
+      return res.status(400).json({ message: 'Provider ID is required' });
+    }
+    if (!ringtoneCode || !ringtoneCode.trim()) {
+      return res.status(400).json({ message: 'Ringtone Code is required' });
+    }
+    if (!contentCode || !contentCode.trim()) {
+      return res.status(400).json({ message: 'Content Code is required' });
+    }
+
+    const slTimestamp = getSriLankaTimestamp();
+
+    await pool.query(
+      `INSERT INTO songringintone (song_id, ringintone_id, status, ringtone_code, content_code, added_date)
+       VALUES (?, ?, 1, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE status = 1, ringtone_code = ?, content_code = ?, added_date = ?`,
+      [
+        songId,
+        parseInt(providerId, 10),
+        ringtoneCode.trim(),
+        contentCode.trim(),
+        slTimestamp,
+        ringtoneCode.trim(),
+        contentCode.trim(),
+        slTimestamp,
+      ]
+    );
+
+    res.status(201).json({ success: true });
+  } catch (error) {
+    console.error('Error adding song ringtone:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────
+// GET /songs/:id/conflicts
+// Returns all non-deleted conflicts for the song.
+// ─────────────────────────────────────────────────────────
+exports.getSongConflicts = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT * FROM SongConflict 
+       WHERE SongId = ? AND IsDeleted = 0 
+       ORDER BY Status DESC, ConflictDate DESC, Id DESC`,
+      [songId]
+    );
+
+    const conflicts = rows.map((r) => ({
+      id: r.Id,
+      songId: r.SongId,
+      copyrightConflict: r.CopyrightConflict,
+      conflictOwner: toTitleCase(r.ConflictOwner), // Display formatted in Title Case
+      conflictDate: r.ConflictDate ? (typeof r.ConflictDate === 'object' ? r.ConflictDate.toISOString().split('T')[0] : String(r.ConflictDate).split('T')[0]) : null,
+      resolveDate: r.ResolveDate ? (typeof r.ResolveDate === 'object' ? r.ResolveDate.toISOString().split('T')[0] : String(r.ResolveDate).split('T')[0]) : null,
+      status: r.Status,
+    }));
+
+    res.json({ conflicts });
+  } catch (error) {
+    console.error('Error fetching song conflicts:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────
+// POST /songs/:id/conflicts
+// Creates a new active conflict for the song.
+// ─────────────────────────────────────────────────────────
+exports.createSongConflict = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    const { copyrightConflict, conflictOwner, conflictDate } = req.body;
+
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+    if (!copyrightConflict || !['Sound Records', 'Compositions'].includes(copyrightConflict)) {
+      return res.status(400).json({ message: 'Invalid copyright conflict type' });
+    }
+    if (!conflictOwner || !conflictOwner.trim()) {
+      return res.status(400).json({ message: 'Conflict Owner is required' });
+    }
+    if (!conflictDate) {
+      return res.status(400).json({ message: 'Conflict Date is required' });
+    }
+
+    await pool.query(
+      `INSERT INTO SongConflict (SongId, CopyrightConflict, ConflictOwner, ConflictDate, Status, IsDeleted)
+       VALUES (?, ?, ?, ?, 1, 0)`,
+      [songId, copyrightConflict, conflictOwner.trim(), conflictDate]
+    );
+
+    res.status(201).json({ success: true });
+  } catch (error) {
+    console.error('Error creating song conflict:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────
+// PATCH /songs/:id/conflicts/:conflictId/resolve
+// Resolves an active conflict by setting Status = 0 and ResolveDate.
+// ─────────────────────────────────────────────────────────
+exports.resolveSongConflict = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    const conflictId = parseInt(req.params.conflictId, 10);
+    const { resolveDate } = req.body;
+
+    if (isNaN(songId) || isNaN(conflictId)) {
+      return res.status(400).json({ message: 'Invalid song ID or conflict ID' });
+    }
+    if (!resolveDate) {
+      return res.status(400).json({ message: 'Resolve Date is required' });
+    }
+
+    await pool.query(
+      `UPDATE SongConflict SET Status = 0, ResolveDate = ? 
+       WHERE Id = ? AND SongId = ?`,
+      [resolveDate, conflictId, songId]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error resolving song conflict:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────
+// PATCH /songs/:id/conflicts/:conflictId/delete
+// Soft deletes a conflict by setting IsDeleted = 1.
+// ─────────────────────────────────────────────────────────
+exports.deleteSongConflict = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    const conflictId = parseInt(req.params.conflictId, 10);
+
+    if (isNaN(songId) || isNaN(conflictId)) {
+      return res.status(400).json({ message: 'Invalid song ID or conflict ID' });
+    }
+
+    await pool.query(
+      `UPDATE SongConflict SET IsDeleted = 1 
+       WHERE Id = ? AND SongId = ?`,
+      [conflictId, songId]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting song conflict:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+
+

@@ -55,12 +55,22 @@ exports.getDistributors = async (req, res) => {
     );
     const totalCount = countRows[0].total;
 
-    // Fetch records with distinct song count from songdistributor table where status = 1 and is_deleted = 0
+    // Fetch records with distinct song count and active conflicts count
     let dataQuery = `
       SELECT d.*, 
              (SELECT COUNT(DISTINCT sd.song_id) 
               FROM songdistributor sd 
-              WHERE sd.distributor_id = d.id AND sd.status = 1 AND sd.is_deleted = 0) as songCount
+              WHERE sd.distributor_id = d.id AND sd.status = 1 AND sd.is_deleted = 0) as songCount,
+             (SELECT COUNT(DISTINCT sc.Id) 
+              FROM songdistributor sd
+              JOIN songs s ON sd.song_id = s.id
+              JOIN SongConflict sc ON sc.SongId = s.id
+              WHERE sd.distributor_id = d.id 
+                AND sd.status = 1 
+                AND sd.is_deleted = 0 
+                AND s.status = 1 
+                AND sc.Status = 1 
+                AND sc.IsDeleted = 0) as conflictCount
       FROM distributors d
       ${whereClauseStr}
       ORDER BY d.company_name ASC
@@ -84,7 +94,7 @@ exports.getDistributors = async (req, res) => {
         percentage: r.outgoing_percentage,
         status: r.status === 1 || r.status === true ? 'Active' : 'Inactive',
         notes: '0 notes',
-        conflicts: '0 conflicts'
+        conflicts: `${r.conflictCount || 0} ${r.conflictCount === 1 ? 'conflict' : 'conflicts'}`
       })),
       totalCount
     });
@@ -139,7 +149,7 @@ exports.getDistributorSongs = async (req, res) => {
       `SELECT COUNT(*) as total
        FROM songdistributor sd
        JOIN songs s ON sd.song_id = s.id
-       WHERE sd.distributor_id = ? AND sd.is_deleted = 0`,
+       WHERE sd.distributor_id = ? AND sd.status = 1 AND sd.is_deleted = 0 AND s.status = 1`,
       [distributorId]
     );
     const totalCount = countRows[0].total;
@@ -157,7 +167,7 @@ exports.getDistributorSongs = async (req, res) => {
              sd.status as mapping_status
       FROM songdistributor sd
       JOIN songs s ON sd.song_id = s.id
-      WHERE sd.distributor_id = ? AND sd.is_deleted = 0
+      WHERE sd.distributor_id = ? AND sd.status = 1 AND sd.is_deleted = 0 AND s.status = 1
       ORDER BY s.name ASC
     `;
 
@@ -202,7 +212,7 @@ exports.createDistributor = async (req, res) => {
     }
 
     const lowercaseEmail = email.trim().toLowerCase();
-    const lowercaseCompany = company.trim().toLowerCase();
+    const normalizedCompany = company.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 
     // Email format validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -212,15 +222,21 @@ exports.createDistributor = async (req, res) => {
 
     // Uniqueness validation (check against non-deleted is_deleted = 0 records)
     const [existing] = await pool.query(
-      'SELECT id, company_name, email FROM distributors WHERE (LOWER(company_name) = ? OR LOWER(email) = ?) AND is_deleted = 0',
-      [lowercaseCompany, lowercaseEmail]
+      `SELECT id, company_name, email FROM distributors 
+       WHERE (LOWER(REPLACE(company_name, ' ', '')) = ? OR LOWER(email) = ?) 
+         AND is_deleted = 0`,
+      [normalizedCompany, lowercaseEmail]
     );
 
     if (existing.length > 0) {
-      if (existing[0].email.toLowerCase() === lowercaseEmail) {
-        return res.status(400).json({ message: 'Email address is already in use by another distributor' });
+      for (const row of existing) {
+        if (row.email.toLowerCase() === lowercaseEmail) {
+          return res.status(400).json({ message: 'Email already exists' });
+        }
+        if (row.company_name.toLowerCase().replace(/[^a-z0-9]/g, '') === normalizedCompany) {
+          return res.status(400).json({ message: 'Distributor name already exists' });
+        }
       }
-      return res.status(400).json({ message: 'Company name is already in use by another distributor' });
     }
 
     const distributor_code = await generateDistributorCode(pool);
@@ -229,14 +245,14 @@ exports.createDistributor = async (req, res) => {
     const [result] = await pool.query(
       `INSERT INTO distributors (distributor_code, email, company_name, outgoing_percentage, status, is_deleted) 
        VALUES (?, ?, ?, ?, ?, 0)`,
-      [distributor_code, lowercaseEmail, lowercaseCompany, parseFloat(percentage), status]
+      [distributor_code, lowercaseEmail, company.trim().toLowerCase(), parseFloat(percentage), status]
     );
 
     res.status(201).json({
       id: result.insertId,
       distributor_code,
       email: lowercaseEmail,
-      company: toTitleCase(lowercaseCompany),
+      company: toTitleCase(company.trim()),
       percentage: parseFloat(percentage),
       status: 'Active'
     });
@@ -258,7 +274,7 @@ exports.updateDistributor = async (req, res) => {
     }
 
     const lowercaseEmail = email.trim().toLowerCase();
-    const lowercaseCompany = company.trim().toLowerCase();
+    const normalizedCompany = company.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 
     // Email format validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -268,19 +284,29 @@ exports.updateDistributor = async (req, res) => {
 
     // Uniqueness validation (check against non-deleted is_deleted = 0 records)
     const [existing] = await pool.query(
-      'SELECT id, company_name, email FROM distributors WHERE (LOWER(company_name) = ? OR LOWER(email) = ?) AND is_deleted = 0 AND id != ?',
-      [lowercaseCompany, lowercaseEmail, id]
+      `SELECT id, company_name, email FROM distributors 
+       WHERE (LOWER(REPLACE(company_name, ' ', '')) = ? OR LOWER(email) = ?) 
+         AND is_deleted = 0 AND id != ?`,
+      [normalizedCompany, lowercaseEmail, id]
     );
 
     if (existing.length > 0) {
-      if (existing[0].email.toLowerCase() === lowercaseEmail) {
-        return res.status(400).json({ message: 'Email address is already in use by another distributor' });
+      for (const row of existing) {
+        if (row.email.toLowerCase() === lowercaseEmail) {
+          return res.status(400).json({ message: 'Email already exists' });
+        }
+        if (row.company_name.toLowerCase().replace(/[^a-z0-9]/g, '') === normalizedCompany) {
+          return res.status(400).json({ message: 'Distributor name already exists' });
+        }
       }
-      return res.status(400).json({ message: 'Company name is already in use by another distributor' });
     }
 
-    const [currentDist] = await pool.query('SELECT status FROM distributors WHERE id = ?', [id]);
-    let dbStatus = currentDist.length > 0 ? currentDist[0].status : 1;
+    const [currentDist] = await pool.query('SELECT status FROM distributors WHERE id = ? AND is_deleted = 0', [id]);
+    if (currentDist.length === 0) {
+      return res.status(404).json({ message: 'Distributor not found' });
+    }
+
+    let dbStatus = currentDist[0].status;
     if (status !== undefined) {
       dbStatus = status === 'Active' || status === true || status === 1 || status === '1' ? 1 : 0;
     }
@@ -289,13 +315,13 @@ exports.updateDistributor = async (req, res) => {
       `UPDATE distributors 
        SET email = ?, company_name = ?, outgoing_percentage = ?, status = ? 
        WHERE id = ?`,
-      [lowercaseEmail, lowercaseCompany, parseFloat(percentage), dbStatus, id]
+      [lowercaseEmail, company.trim().toLowerCase(), parseFloat(percentage), dbStatus, id]
     );
 
     res.json({
       id: parseInt(id, 10),
       email: lowercaseEmail,
-      company: toTitleCase(lowercaseCompany),
+      company: toTitleCase(company.trim()),
       percentage: parseFloat(percentage),
       status: dbStatus === 1 ? 'Active' : 'Inactive'
     });
@@ -327,11 +353,13 @@ exports.inactivateDistributor = async (req, res) => {
       [id]
     );
 
-    if (dependencies.length > 0 && !force) {
+    const validDependencies = dependencies.filter(row => row.id !== null);
+
+    if (validDependencies.length > 0 && !force) {
       return res.json({
         success: false,
         hasDependencies: true,
-        dependentSongs: dependencies.map(row => ({
+        dependentSongs: validDependencies.map(row => ({
           id: row.id,
           name: toTitleCase(row.name),
           artist: toTitleCase(row.artist) || 'Unknown Artist',
@@ -342,8 +370,8 @@ exports.inactivateDistributor = async (req, res) => {
 
     // Set distributor status = 0
     await pool.query('UPDATE distributors SET status = 0 WHERE id = ?', [id]);
-    // Set all related songdistributor mapping status = 0
-    await pool.query('UPDATE songdistributor SET status = 0 WHERE distributor_id = ?', [id]);
+    // Set all related songdistributor mapping status = 0 (only non-deleted)
+    await pool.query('UPDATE songdistributor SET status = 0 WHERE distributor_id = ? AND is_deleted = 0', [id]);
 
     res.json({
       success: true,
@@ -355,8 +383,8 @@ exports.inactivateDistributor = async (req, res) => {
   }
 };
 
-// Delete distributor (soft delete by setting is_deleted = 1)
-exports.deleteDistributor = async (req, res) => {
+// Activate / Reactivate distributor (restores status = 1 and related non-deleted song mappings to status = 1)
+exports.activateDistributor = async (req, res) => {
   try {
     const pool = getPool();
     const id = parseInt(req.params.id, 10);
@@ -365,16 +393,133 @@ exports.deleteDistributor = async (req, res) => {
       return res.status(400).json({ message: 'Invalid distributor ID' });
     }
 
+    // Set distributor status = 1 (active)
+    await pool.query('UPDATE distributors SET status = 1 WHERE id = ? AND is_deleted = 0', [id]);
+    // Set all related non-deleted songdistributor mapping status = 1
+    await pool.query('UPDATE songdistributor SET status = 1 WHERE distributor_id = ? AND is_deleted = 0', [id]);
+
+    res.json({
+      success: true
+    });
+  } catch (error) {
+    console.error('Error activating distributor:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// Delete distributor (soft delete by setting is_deleted = 1)
+exports.deleteDistributor = async (req, res) => {
+  try {
+    const pool = getPool();
+    const id = parseInt(req.params.id, 10);
+    const force = req.query.force === 'true' || req.body.force === true;
+
+    if (isNaN(id)) {
+      return res.status(400).json({ message: 'Invalid distributor ID' });
+    }
+
+    // Verify distributor is inactive before deleting
+    const [distRows] = await pool.query('SELECT status FROM distributors WHERE id = ? AND is_deleted = 0', [id]);
+    if (distRows.length === 0) {
+      return res.status(404).json({ message: 'Distributor not found' });
+    }
+    if (distRows[0].status === 1) {
+      return res.status(400).json({ message: 'Active distributors cannot be deleted. Please inactivate first.' });
+    }
+
+    // Check related non-deleted song relationships in songdistributor
+    const [dependencies] = await pool.query(
+      `SELECT s.id, s.name,
+              (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id = s.id) as artist,
+              '—' as album
+       FROM songdistributor sd
+       JOIN songs s ON sd.song_id = s.id
+       WHERE sd.distributor_id = ? AND sd.is_deleted = 0`,
+      [id]
+    );
+
+    const validDependencies = dependencies.filter(row => row.id !== null);
+
+    if (validDependencies.length > 0 && !force) {
+      return res.json({
+        success: false,
+        hasDependencies: true,
+        dependentSongs: validDependencies.map(row => ({
+          id: row.id,
+          name: toTitleCase(row.name),
+          artist: toTitleCase(row.artist) || 'Unknown Artist',
+          album: '—'
+        }))
+      });
+    }
+
     // Update distributors table to set is_deleted = 1
     await pool.query('UPDATE distributors SET is_deleted = 1 WHERE id = ?', [id]);
     // Update related songdistributor table to set is_deleted = 1
     await pool.query('UPDATE songdistributor SET is_deleted = 1 WHERE distributor_id = ?', [id]);
 
     res.json({
-      success: true
+      success: true,
+      hasDependencies: false
     });
   } catch (error) {
     console.error('Error deleting distributor:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// Get distributor active conflicts (status = 1 songs, status = 1 songdistributor mapping, status = 1 active conflict)
+exports.getDistributorConflicts = async (req, res) => {
+  try {
+    const pool = getPool();
+    const distributorId = parseInt(req.params.id, 10);
+
+    if (isNaN(distributorId)) {
+      return res.status(400).json({ message: 'Invalid distributor ID' });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT 
+         s.id as songId, 
+         s.name, 
+         (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id = s.id) as artist,
+         (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songLyrics sl JOIN artists a ON sl.artist_id = a.id WHERE sl.song_id = s.id) as lyricist,
+         (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songmusician sm JOIN artists a ON sm.artist_id = a.id WHERE sm.song_id = s.id) as musician,
+         s.ownership,
+         s.notes,
+         sc.Id as conflictId,
+         sc.CopyrightConflict as copyrightConflict,
+         sc.ConflictOwner as conflictOwner,
+         sc.ConflictDate as conflictDate
+       FROM songdistributor sd
+       JOIN songs s ON sd.song_id = s.id
+       JOIN SongConflict sc ON sc.SongId = s.id
+       WHERE sd.distributor_id = ?
+         AND sd.status = 1 
+         AND sd.is_deleted = 0
+         AND s.status = 1
+         AND sc.Status = 1
+         AND sc.IsDeleted = 0
+       ORDER BY s.name ASC`,
+      [distributorId]
+    );
+
+    res.json({
+      conflicts: rows.map(r => ({
+        id: r.conflictId,
+        songId: r.songId,
+        name: toTitleCase(r.name),
+        artist: toTitleCase(r.artist) || 'Unknown Artist',
+        lyrics: toTitleCase(r.lyricist) || '—',
+        music: toTitleCase(r.musician) || '—',
+        ownership: r.ownership ? `${r.ownership}%` : '100%',
+        conflictOwner: toTitleCase(r.conflictOwner) || '—',
+        copyrightConflict: r.copyrightConflict || 'Sound Records',
+        notes: r.notes || 'No Cases Or Notes'
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching distributor conflicts:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 };

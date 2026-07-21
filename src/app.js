@@ -5,6 +5,8 @@ const artistRoutes = require('./routes/artistRoutes');
 const songRoutes = require('./routes/songRoutes');
 const distributorRoutes = require('./routes/distributorRoutes');
 const ringtoneRoutes = require('./routes/ringtoneRoutes');
+const recordLabelRoutes = require('./routes/recordLabelRoutes');
+const albumRoutes = require('./routes/albumRoutes');
 
 const app = express();
 
@@ -12,8 +14,8 @@ const app = express();
 app.use(cors({
   origin: '*', // Allow all origins for local development integration
 }));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Serve static uploaded files
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
@@ -23,6 +25,9 @@ app.use('/api/artists', artistRoutes);
 app.use('/api/songs', songRoutes);
 app.use('/api/distributors', distributorRoutes);
 app.use('/api/ringtones', ringtoneRoutes);
+app.use('/api/record-label', recordLabelRoutes);
+app.use('/api/recode-labels', recordLabelRoutes);
+app.use('/api/albums', albumRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

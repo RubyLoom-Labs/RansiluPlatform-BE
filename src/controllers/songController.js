@@ -936,7 +936,7 @@ exports.getSongRingtones = async (req, res) => {
          r.company_logo   AS companyLogo
        FROM songringintone sr
        JOIN ringintone r ON sr.ringintone_id = r.id
-       WHERE sr.song_id = ? AND sr.status = 1
+       WHERE sr.song_id = ? AND sr.status = 1 AND sr.is_deleted = 0
        ORDER BY sr.ringintone_id ASC`,
       [songId]
     );
@@ -984,7 +984,7 @@ exports.removeSongRingtone = async (req, res) => {
     }
 
     const [result] = await pool.query(
-      'UPDATE songringintone SET status = 0 WHERE song_id = ? AND ringintone_id = ?',
+      'UPDATE songringintone SET status = 0, is_deleted = 1 WHERE song_id = ? AND ringintone_id = ?',
       [songId, ringtoneId]
     );
 

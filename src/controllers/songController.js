@@ -18,6 +18,27 @@ function toTitleCase(str) {
     .join(' ');
 }
 
+async function fetchSongConflictsMap(songIds, pool) {
+  if (!Array.isArray(songIds) || songIds.length === 0) return {};
+  try {
+    const [rows] = await pool.query(
+      `SELECT SongId, COUNT(*) as count 
+       FROM SongConflict 
+       WHERE SongId IN (?) AND Status = 1 AND (IsDeleted = 0 OR IsDeleted IS NULL)
+       GROUP BY SongId`,
+      [songIds]
+    );
+    const map = {};
+    rows.forEach(r => {
+      map[r.SongId] = r.count;
+    });
+    return map;
+  } catch (err) {
+    console.error('Error fetching song conflicts map:', err);
+    return {};
+  }
+}
+
 // Get all songs
 exports.getSongs = async (req, res) => {
   try {
@@ -152,8 +173,8 @@ exports.getSongs = async (req, res) => {
     const [distRelations] = await pool.query(`
       SELECT sd.song_id, sd.distributor_id, d.company_name
       FROM songdistributor sd
-      JOIN distributors d ON sd.distributor_id = d.id
-      WHERE sd.song_id IN (?) AND sd.status = 1
+      JOIN distributors d ON sd.distributor_id = d.id AND (d.is_deleted = 0 OR d.is_deleted IS NULL)
+      WHERE sd.song_id IN (?) AND (sd.status = 1 OR sd.status IS NULL) AND (sd.is_deleted = 0 OR sd.is_deleted IS NULL)
     `, [songIds]);
 
     const songDistributors = {};
@@ -209,6 +230,9 @@ exports.getSongs = async (req, res) => {
       }
     });
 
+    // 3.4 Fetch active conflicts from SongConflict table
+    const songConflictsMap = await fetchSongConflictsMap(songIds, pool);
+
     // 4. Map songs to the shape expected by the frontend
     const formattedSongs = songs.map((song) => {
       const rels = songRelations[song.id] || { singers: [], lyricists: [], musicians: [] };
@@ -216,6 +240,8 @@ exports.getSongs = async (req, res) => {
       const ring = songRingtones[song.id] || null;
       const labelList = songLabels[song.id] || [];
       const labelsText = labelList.map(l => l.name).join(', ') || 'None';
+      const cCount = songConflictsMap[song.id] || 0;
+      const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : (song.conflict || 'No');
 
       return {
         id: song.id,
@@ -231,7 +257,9 @@ exports.getSongs = async (req, res) => {
         labelNames: labelsText,
         ownership: song.ownership || 100,
         notes: song.notes || 'No Cases Or Notes',
-        conflict: song.conflict || 'No',
+        conflictCount: cCount,
+        conflicts: conflictText,
+        conflict: conflictText,
         versionType: song.versionType || 'Original',
         versionName: song.versionName,
         originalSongId: song.originalSongId,
@@ -1120,9 +1148,13 @@ exports.getSongVersions = async (req, res) => {
       else if (rel.role === 'musician') relMap[rel.song_id].musicians.push(rel.artist_name);
     });
 
+    const songConflictsMap = await fetchSongConflictsMap(versionIds, pool);
+
     const versions = versionSongs.map((s) => {
       const rels = relMap[s.id] || { singers: [], lyricists: [], musicians: [] };
       const parsedLabels = songLabelsMap[s.id] || [];
+      const cCount = songConflictsMap[s.id] || 0;
+      const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : (s.conflict || 'No');
       return {
         id: s.id,
         versionName: s.versionName || toTitleCase(s.name),
@@ -1136,7 +1168,9 @@ exports.getSongVersions = async (req, res) => {
         recordLabels: parsedLabels,
         ownership: s.ownership || 100,
         notes: s.notes || 'No Cases Or Notes',
-        conflicts: s.conflict || 'No',
+        conflictCount: cCount,
+        conflicts: conflictText,
+        conflict: conflictText,
       };
     });
 

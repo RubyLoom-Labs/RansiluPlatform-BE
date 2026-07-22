@@ -218,6 +218,27 @@ async function fetchSongLabelsMap(songIds, pool, host) {
   return songLabels;
 }
 
+async function fetchSongConflictsMap(songIds, pool) {
+  if (!Array.isArray(songIds) || songIds.length === 0) return {};
+  try {
+    const [rows] = await pool.query(
+      `SELECT SongId, COUNT(*) as count 
+       FROM SongConflict 
+       WHERE SongId IN (?) AND Status = 1 AND (IsDeleted = 0 OR IsDeleted IS NULL)
+       GROUP BY SongId`,
+      [songIds]
+    );
+    const map = {};
+    rows.forEach(r => {
+      map[r.SongId] = r.count;
+    });
+    return map;
+  } catch (err) {
+    console.error('Error fetching song conflicts map:', err);
+    return {};
+  }
+}
+
 // GET /distributor/:id/songs
 exports.getDistributorSongs = async (req, res) => {
   try {
@@ -271,10 +292,13 @@ exports.getDistributorSongs = async (req, res) => {
 
     const songIds = rows.map(s => s.id);
     const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
+    const songConflictsMap = await fetchSongConflictsMap(songIds, pool);
 
     res.json({
       songs: rows.map(s => {
         const parsedLabels = songLabelsMap[s.id] || [];
+        const cCount = songConflictsMap[s.id] || 0;
+        const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : 'No';
         return {
           id: s.id,
           name: toTitleCase(s.name),
@@ -289,6 +313,9 @@ exports.getDistributorSongs = async (req, res) => {
           isrcCode: s.isrcCode || '—',
           versionType: s.versionType || 'Original',
           ownership: s.ownership || 100,
+          conflictCount: cCount,
+          conflicts: conflictText,
+          conflict: conflictText,
           status: s.mapping_status === 1 || s.mapping_status === true ? 'Active' : 'Inactive'
         };
       }),

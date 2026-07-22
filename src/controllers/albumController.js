@@ -187,6 +187,27 @@ async function fetchSongLabelsMap(songIds, pool, host) {
   return songLabels;
 }
 
+async function fetchSongConflictsMap(songIds, pool) {
+  if (!Array.isArray(songIds) || songIds.length === 0) return {};
+  try {
+    const [rows] = await pool.query(
+      `SELECT SongId, COUNT(*) as count 
+       FROM SongConflict 
+       WHERE SongId IN (?) AND Status = 1 AND (IsDeleted = 0 OR IsDeleted IS NULL)
+       GROUP BY SongId`,
+      [songIds]
+    );
+    const map = {};
+    rows.forEach(r => {
+      map[r.SongId] = r.count;
+    });
+    return map;
+  } catch (err) {
+    console.error('Error fetching song conflicts map:', err);
+    return {};
+  }
+}
+
 // GET /albums/:id (Basic details only for fast initial load)
 exports.getAlbumById = async (req, res) => {
   try {
@@ -302,8 +323,10 @@ exports.getAlbumSongs = async (req, res) => {
     `, [id]);
     const totalCount = countRows[0] ? countRows[0].total : 0;
 
+    const isExport = req.query.export === 'true';
+
     // Fetch related songs
-    const [songRows] = await pool.query(`
+    let dataQuery = `
       SELECT s.id, s.name, s.imageUrl, s.isrcCode, s.versionType,
              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songSinger ss JOIN artists art ON ss.artist_id = art.id WHERE ss.song_id = s.id) as artist,
              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songLyrics sl JOIN artists art ON sl.artist_id = art.id WHERE sl.song_id = s.id) as lyricist,
@@ -315,15 +338,25 @@ exports.getAlbumSongs = async (req, res) => {
         AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
         AND (s.status = 1 OR s.status IS NULL)
       ORDER BY s.name ASC
-      LIMIT ? OFFSET ?
-    `, [id, limit, offset]);
+    `;
+
+    let songRows;
+    if (isExport) {
+      [songRows] = await pool.query(dataQuery, [id]);
+    } else {
+      dataQuery += ` LIMIT ? OFFSET ?`;
+      [songRows] = await pool.query(dataQuery, [id, limit, offset]);
+    }
 
     const songIds = songRows.map(s => s.id);
     const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
+    const songConflictsMap = await fetchSongConflictsMap(songIds, pool);
 
     const formattedSongs = songRows.map(s => {
       const parsedLabels = songLabelsMap[s.id] || [];
       const songLabelList = parsedLabels.length > 0 ? parsedLabels : albumLabelObj;
+      const cCount = songConflictsMap[s.id] || 0;
+      const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : 'No';
       return {
         id: s.id,
         name: toTitleCase(s.name),
@@ -334,6 +367,9 @@ exports.getAlbumSongs = async (req, res) => {
         duration: '03:45',
         isrcCode: s.isrcCode || '—',
         versionType: s.versionType || 'Original',
+        conflictCount: cCount,
+        conflicts: conflictText,
+        conflict: conflictText,
         labels: songLabelList,
         recordLabels: songLabelList,
         labelNames: songLabelList.map(l => l.name).join(', ') || 'None'
@@ -443,6 +479,10 @@ exports.createAlbum = async (req, res) => {
       return res.status(400).json({ message: 'Album name is required' });
     }
 
+    if (!image_url || (typeof image_url === 'string' && !image_url.trim())) {
+      return res.status(400).json({ message: 'Album cover image is required' });
+    }
+
     const convertedName = toSimpleLetters(name);
     const displayName = name.trim();
 
@@ -465,7 +505,7 @@ exports.createAlbum = async (req, res) => {
     const [result] = await pool.query(
       `INSERT INTO album (name, display_name, image_url, record_label_id, is_delete)
        VALUES (?, ?, ?, ?, 0)`,
-      [convertedName, displayName, image_url || null, labelId]
+      [convertedName, displayName, image_url, labelId]
     );
 
     const albumId = result.insertId;
@@ -504,6 +544,10 @@ exports.updateAlbum = async (req, res) => {
 
     if (!name || !name.trim()) {
       return res.status(400).json({ message: 'Album name is required' });
+    }
+
+    if (!image_url || (typeof image_url === 'string' && !image_url.trim())) {
+      return res.status(400).json({ message: 'Album cover image is required' });
     }
 
     const convertedName = toSimpleLetters(name);

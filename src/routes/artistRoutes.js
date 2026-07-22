@@ -10,5 +10,6 @@ router.get('/:id/albums', artistController.getArtistAlbums);
 router.post('/check-name', artistController.checkArtistName);
 router.post('/', upload.single('image'), artistController.createArtist);
 router.put('/:id', upload.single('image'), artistController.updateArtist);
+router.delete('/:id', artistController.deleteArtist);
 
 module.exports = router;

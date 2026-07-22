@@ -45,7 +45,7 @@ exports.getArtists = async (req, res) => {
     const isExport = req.query.export === 'true';
 
     // Build WHERE clause
-    let whereClauses = [];
+    let whereClauses = ['(a.is_delete = 0 OR a.is_delete IS NULL)'];
     let queryParams = [];
 
     if (search) {
@@ -107,11 +107,20 @@ exports.getArtists = async (req, res) => {
 
     // Fetch paginated and filtered records
     let dataQuery = `
-      SELECT a.*, COUNT(ss.song_id) as songsCount 
+      SELECT a.*, 
+        (
+          SELECT COUNT(DISTINCT rel.song_id)
+          FROM (
+            SELECT song_id FROM songSinger WHERE artist_id = a.id
+            UNION
+            SELECT song_id FROM songLyrics WHERE artist_id = a.id
+            UNION
+            SELECT song_id FROM songmusician WHERE artist_id = a.id
+          ) as rel
+          JOIN songs s ON rel.song_id = s.id AND (s.status = 1 OR s.status IS NULL)
+        ) as songsCount 
       FROM artists a 
-      LEFT JOIN songSinger ss ON a.id = ss.artist_id
       ${whereClauseStr}
-      GROUP BY a.id 
       ${orderBy}
     `;
     
@@ -284,6 +293,27 @@ exports.updateArtist = async (req, res) => {
     let other = parseBool(req.body.other);
     const status = req.body.status !== undefined ? parseBool(req.body.status) : true;
 
+    if (!status) {
+      const [activeSongsCheck] = await pool.query(
+        `SELECT COUNT(DISTINCT rel.song_id) as total
+         FROM (
+           SELECT song_id FROM songSinger WHERE artist_id = ?
+           UNION
+           SELECT song_id FROM songLyrics WHERE artist_id = ?
+           UNION
+           SELECT song_id FROM songmusician WHERE artist_id = ?
+         ) as rel
+         JOIN songs s ON rel.song_id = s.id AND (s.status = 1 OR s.status = 'Active' OR s.status IS NULL)`,
+        [id, id, id]
+      );
+      if (activeSongsCheck[0] && activeSongsCheck[0].total > 0) {
+        return res.status(400).json({ 
+          message: 'Cannot inactivate artist with active linked songs.',
+          activeSongsCount: activeSongsCheck[0].total 
+        });
+      }
+    }
+
     // Fallback checks for types array
     let types = req.body.types || [];
     if (!Array.isArray(types)) {
@@ -383,10 +413,10 @@ exports.checkArtistName = async (req, res) => {
 
     const simpleInput = toSimpleName(name);
 
-    let query = 'SELECT id, name FROM artists';
+    let query = 'SELECT id, name FROM artists WHERE (is_delete = 0 OR is_delete IS NULL)';
     let queryParams = [];
     if (id) {
-      query += ' WHERE id != ?';
+      query += ' AND id != ?';
       queryParams.push(id);
     }
 
@@ -410,7 +440,7 @@ exports.getArtistById = async (req, res) => {
       return res.status(400).json({ message: 'Invalid artist ID' });
     }
 
-    const [rows] = await pool.query('SELECT * FROM artists WHERE id = ?', [artistId]);
+    const [rows] = await pool.query('SELECT * FROM artists WHERE id = ? AND (is_delete = 0 OR is_delete IS NULL)', [artistId]);
     if (rows.length === 0) {
       return res.status(404).json({ message: 'Artist not found' });
     }
@@ -425,6 +455,19 @@ exports.getArtistById = async (req, res) => {
 
     const host = `${req.protocol}://${req.get('host')}`;
 
+    const [countRows] = await pool.query(`
+      SELECT COUNT(DISTINCT rel.song_id) as total
+      FROM (
+        SELECT song_id FROM songSinger WHERE artist_id = ?
+        UNION
+        SELECT song_id FROM songLyrics WHERE artist_id = ?
+        UNION
+        SELECT song_id FROM songmusician WHERE artist_id = ?
+      ) as rel
+      JOIN songs s ON rel.song_id = s.id AND (s.status = 1 OR s.status IS NULL)
+    `, [artistId, artistId, artistId]);
+    const songsCount = countRows[0] ? countRows[0].total : 0;
+
     res.json({
       id: artist.id,
       name: artist.name,
@@ -438,6 +481,7 @@ exports.getArtistById = async (req, res) => {
       band: artist.band === 1 || artist.band === true,
       other: artist.other === 1 || artist.other === true,
       status: artist.status === 1 || artist.status === true,
+      songsCount,
       avatar: artist.image 
         ? (artist.image.startsWith('http') ? artist.image : `${host}${artist.image}`) 
         : 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=200&h=200',
@@ -500,6 +544,27 @@ async function fetchSongLabelsMap(songIds, pool, host) {
   return songLabels;
 }
 
+async function fetchSongConflictsMap(songIds, pool) {
+  if (!Array.isArray(songIds) || songIds.length === 0) return {};
+  try {
+    const [rows] = await pool.query(
+      `SELECT SongId, COUNT(*) as count 
+       FROM SongConflict 
+       WHERE SongId IN (?) AND Status = 1 AND (IsDeleted = 0 OR IsDeleted IS NULL)
+       GROUP BY SongId`,
+      [songIds]
+    );
+    const map = {};
+    rows.forEach(r => {
+      map[r.SongId] = r.count;
+    });
+    return map;
+  } catch (err) {
+    console.error('Error fetching song conflicts map:', err);
+    return {};
+  }
+}
+
 // GET /artists/:id/songs (Lazy-loaded songs with pagination)
 exports.getArtistSongs = async (req, res) => {
   try {
@@ -514,6 +579,8 @@ exports.getArtistSongs = async (req, res) => {
     }
 
     const host = `${req.protocol}://${req.get('host')}`;
+
+    const isExport = req.query.export === 'true';
 
     // Count query for total songs
     const [countRows] = await pool.query(`
@@ -530,7 +597,7 @@ exports.getArtistSongs = async (req, res) => {
 
     const totalCount = countRows[0] ? countRows[0].total : 0;
 
-    const [rows] = await pool.query(`
+    let dataQuery = `
       SELECT DISTINCT s.id, s.name, s.imageUrl, s.isrcCode, s.versionType, s.ownership,
              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songSinger ss JOIN artists art ON ss.artist_id = art.id WHERE ss.song_id = s.id) as artist,
              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songLyrics sl JOIN artists art ON sl.artist_id = art.id WHERE sl.song_id = s.id) as lyricist,
@@ -544,14 +611,24 @@ exports.getArtistSongs = async (req, res) => {
       ) as rel
       JOIN songs s ON rel.song_id = s.id AND (s.status = 1 OR s.status IS NULL)
       ORDER BY s.name ASC
-      LIMIT ? OFFSET ?
-    `, [artistId, artistId, artistId, limit, offset]);
+    `;
+
+    let rows;
+    if (isExport) {
+      [rows] = await pool.query(dataQuery, [artistId, artistId, artistId]);
+    } else {
+      dataQuery += ` LIMIT ? OFFSET ?`;
+      [rows] = await pool.query(dataQuery, [artistId, artistId, artistId, limit, offset]);
+    }
 
     const songIds = rows.map(s => s.id);
     const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
+    const songConflictsMap = await fetchSongConflictsMap(songIds, pool);
 
     const formattedSongs = rows.map(s => {
       const parsedLabels = songLabelsMap[s.id] || [];
+      const cCount = songConflictsMap[s.id] || 0;
+      const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : 'No';
       return {
         id: s.id,
         name: toTitleCase(s.name),
@@ -564,6 +641,10 @@ exports.getArtistSongs = async (req, res) => {
         isrcCode: s.isrcCode || '—',
         versionType: s.versionType || 'Original',
         ownership: s.ownership || 100,
+        conflictCount: cCount,
+        conflicts: conflictText,
+        conflict: conflictText,
+        status: 'Active',
         labels: parsedLabels,
         recordLabels: parsedLabels,
         labelNames: parsedLabels.map(l => l.name).join(', ') || 'None'
@@ -651,3 +732,46 @@ exports.getArtistAlbums = async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+// DELETE /artists/:id (Soft delete artist by setting is_delete = 1)
+exports.deleteArtist = async (req, res) => {
+  try {
+    const pool = getPool();
+    const artistId = parseInt(req.params.id, 10);
+    if (isNaN(artistId)) {
+      return res.status(400).json({ message: 'Invalid artist ID' });
+    }
+
+    // Check active linked songs across songSinger, songLyrics, songmusician
+    const [countRows] = await pool.query(
+      `SELECT COUNT(DISTINCT rel.song_id) as total
+       FROM (
+         SELECT song_id FROM songSinger WHERE artist_id = ?
+         UNION
+         SELECT song_id FROM songLyrics WHERE artist_id = ?
+         UNION
+         SELECT song_id FROM songmusician WHERE artist_id = ?
+       ) as rel
+       JOIN songs s ON rel.song_id = s.id AND (s.status = 1 OR s.status = 'Active' OR s.status IS NULL)`,
+      [artistId, artistId, artistId]
+    );
+
+    if (countRows[0] && countRows[0].total > 0) {
+      return res.status(400).json({ 
+        message: 'Cannot delete artist with active linked songs.',
+        activeSongsCount: countRows[0].total 
+      });
+    }
+
+    await pool.query(
+      'UPDATE artists SET is_delete = 1, status = 0 WHERE id = ?',
+      [artistId]
+    );
+
+    res.json({ message: 'Artist deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting artist:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+

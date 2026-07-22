@@ -39,6 +39,49 @@ async function fetchSongConflictsMap(songIds, pool) {
   }
 }
 
+function formatImage(pathStr, host) {
+  if (!pathStr) return null;
+  if (pathStr.startsWith('http://') || pathStr.startsWith('https://') || pathStr.startsWith('data:')) return pathStr;
+  const cleanPath = pathStr.replace(/\\/g, '/');
+  return cleanPath.startsWith('/') ? `${host}${cleanPath}` : `${host}/${cleanPath}`;
+}
+
+async function fetchSongLabelsMap(songIds, pool, host) {
+  if (!Array.isArray(songIds) || songIds.length === 0) return {};
+  try {
+    const [labelRelations] = await pool.query(`
+      SELECT sa.song_id, rl.id as label_id, COALESCE(rl.display_name, rl.name) as label_name, rl.image_url as label_image
+      FROM songalbum sa
+      JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+      JOIN record_label rl ON a.record_label_id = rl.id 
+        AND (rl.status = 1 OR rl.status IS NULL) 
+        AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+      WHERE sa.song_id IN (?) AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+    `, [songIds]);
+
+    const songLabels = {};
+    labelRelations.forEach((rel) => {
+      if (!songLabels[rel.song_id]) {
+        songLabels[rel.song_id] = [];
+      }
+      if (rel.label_name && !songLabels[rel.song_id].some(l => String(l.id) === String(rel.label_id))) {
+        const formattedImg = formatImage(rel.label_image, host);
+        songLabels[rel.song_id].push({
+          id: rel.label_id,
+          name: toTitleCase(rel.label_name),
+          imageUrl: formattedImg,
+          image_url: formattedImg
+        });
+      }
+    });
+
+    return songLabels;
+  } catch (err) {
+    console.error('Error fetching song labels map:', err);
+    return {};
+  }
+}
+
 // Get all songs
 exports.getSongs = async (req, res) => {
   try {
@@ -1383,14 +1426,18 @@ exports.getSongAlbumsAndLabels = async (req, res) => {
       SELECT 
         a.id as album_id,
         a.name as album_name,
+        a.display_name as album_display_name,
         a.image_url as album_image,
         a.record_label_id,
+        YEAR(a.created_at) as album_year,
         rl.id as label_id,
         COALESCE(rl.display_name, rl.name) as label_name,
         rl.image_url as label_image,
         (SELECT COUNT(DISTINCT sa_count.song_id) 
          FROM songalbum sa_count 
-         JOIN songs s_count ON sa_count.song_id = s_count.id AND (s_count.status = 1 OR s_count.status IS NULL)
+         JOIN songs s_count ON sa_count.song_id = s_count.id 
+           AND (s_count.status = 1 OR s_count.status = 'Active' OR s_count.status IS NULL) 
+           AND (s_count.is_delete = 0 OR s_count.is_delete IS NULL)
          WHERE sa_count.album_id = a.id 
            AND (sa_count.status = 1 OR sa_count.status IS NULL) 
            AND (sa_count.is_delete = 0 OR sa_count.is_delete IS NULL)
@@ -1420,13 +1467,14 @@ exports.getSongAlbumsAndLabels = async (req, res) => {
           image_url: albumImg,
           imageUrl: albumImg,
           coverUrl: albumImg,
+          type: 'Album Type',
           record_label_id: r.record_label_id,
           recordLabelName: toTitleCase(r.label_name || '—'),
           recordLabelImage: labelImg,
           track_count: r.track_count || 0,
           songsCount: r.track_count || 0,
           tracks: `${r.track_count || 0} Tracks`,
-          year: '2022'
+          year: r.album_year ? String(r.album_year) : '2022'
         };
       }
 
@@ -1444,12 +1492,78 @@ exports.getSongAlbumsAndLabels = async (req, res) => {
       }
     });
 
+    // 2. Fetch Version Albums (Unique albums containing active version songs of this song)
+    let versionAlbums = [];
+    const [vSongRows] = await pool.query(`
+      SELECT id FROM songs
+      WHERE originalSongId = ?
+        AND (status = 1 OR status = 'Active' OR status IS NULL)
+        AND (is_delete = 0 OR is_delete IS NULL)
+    `, [songId]);
+
+    if (vSongRows.length > 0) {
+      const vSongIds = vSongRows.map(s => s.id);
+      const [vAlbumRows] = await pool.query(`
+        SELECT DISTINCT
+          a.id as album_id,
+          a.name as album_name,
+          a.display_name as album_display_name,
+          a.image_url as album_image,
+          a.record_label_id,
+          YEAR(a.created_at) as album_year,
+          rl.id as label_id,
+          COALESCE(rl.display_name, rl.name) as label_name,
+          (SELECT COUNT(DISTINCT sa_count.song_id) 
+           FROM songalbum sa_count 
+           JOIN songs s_count ON sa_count.song_id = s_count.id 
+             AND (s_count.status = 1 OR s_count.status = 'Active' OR s_count.status IS NULL) 
+             AND (s_count.is_delete = 0 OR s_count.is_delete IS NULL)
+           WHERE sa_count.album_id = a.id 
+             AND (sa_count.status = 1 OR sa_count.status IS NULL) 
+             AND (sa_count.is_delete = 0 OR sa_count.is_delete IS NULL)
+          ) as track_count
+        FROM songalbum sa
+        JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+        LEFT JOIN record_label rl ON a.record_label_id = rl.id 
+          AND (rl.status = 1 OR rl.status IS NULL) 
+          AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+        WHERE sa.song_id IN (?)
+          AND (sa.status = 1 OR sa.status IS NULL) 
+          AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+        ORDER BY a.name ASC
+      `, [vSongIds]);
+
+      const vAlbumsMap = {};
+      vAlbumRows.forEach(r => {
+        if (!vAlbumsMap[r.album_id]) {
+          const albumImg = formatImage(r.album_image, host);
+          vAlbumsMap[r.album_id] = {
+            id: r.album_id,
+            name: toTitleCase(r.album_name),
+            image_url: albumImg,
+            imageUrl: albumImg,
+            coverUrl: albumImg,
+            type: 'Remastered',
+            record_label_id: r.record_label_id,
+            recordLabelName: toTitleCase(r.label_name || '—'),
+            track_count: r.track_count || 0,
+            songsCount: r.track_count || 0,
+            tracks: `${r.track_count || 0} Tracks`,
+            year: r.album_year ? String(r.album_year) : '2023'
+          };
+        }
+      });
+
+      versionAlbums = Object.values(vAlbumsMap);
+    }
+
     const albums = Object.values(albumsMap);
     const recordLabels = Object.values(recordLabelsMap);
 
     res.json({
       albums,
-      recordLabels
+      recordLabels,
+      versionAlbums
     });
   } catch (error) {
     console.error('Error fetching song albums and labels:', error);

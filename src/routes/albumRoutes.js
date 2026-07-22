@@ -15,6 +15,7 @@ router.post('/', albumController.createAlbum);
 // Individual resource routes
 router.get('/:id', albumController.getAlbumById);
 router.get('/:id/songs', albumController.getAlbumSongs);
+router.get('/:id/artists', albumController.getAlbumArtists);
 router.put('/:id', albumController.updateAlbum);
 router.delete('/:id', albumController.deleteAlbum);
 

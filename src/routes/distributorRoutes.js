@@ -12,6 +12,7 @@ router.patch('/reactivate/:id', distributorController.activateDistributor);
 router.patch('/:id/reactivate', distributorController.activateDistributor);
 router.get('/:id/songs', distributorController.getDistributorSongs);
 router.get('/:id/conflicts', distributorController.getDistributorConflicts);
+router.get('/:id/labels', distributorController.getDistributorLabels);
 
 router.get('/:id', distributorController.getDistributorById);
 router.put('/:id', distributorController.updateDistributor);

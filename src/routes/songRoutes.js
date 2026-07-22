@@ -8,6 +8,8 @@ router.get('/:id', songController.getSongById);
 router.post('/check-name', songController.checkSongName);
 
 // Song-scoped sub-resource endpoints
+router.get('/:id/albums', songController.getSongAlbumsAndLabels);
+router.delete('/:id/albums/:albumId', songController.removeSongAlbumRelationship);
 router.get('/:id/distributions', songController.getSongDistributions);
 router.get('/:id/ringtones', songController.getSongRingtones);
 router.post('/:id/ringtones', songController.addSongRingtone);

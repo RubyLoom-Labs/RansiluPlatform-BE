@@ -5,6 +5,8 @@ const upload = require('../middlewares/upload');
 
 router.get('/', artistController.getArtists);
 router.get('/:id', artistController.getArtistById);
+router.get('/:id/songs', artistController.getArtistSongs);
+router.get('/:id/albums', artistController.getArtistAlbums);
 router.post('/check-name', artistController.checkArtistName);
 router.post('/', upload.single('image'), artistController.createArtist);
 router.put('/:id', upload.single('image'), artistController.updateArtist);

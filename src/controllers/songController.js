@@ -1095,6 +1095,8 @@ exports.getSongVersions = async (req, res) => {
     }
 
     const versionIds = versionSongs.map((s) => s.id);
+    const host = `${req.protocol}://${req.get('host')}`;
+    const songLabelsMap = await fetchSongLabelsMap(versionIds, pool, host);
 
     // Fetch artist relations for these version songs
     const [relations] = await pool.query(
@@ -1120,6 +1122,7 @@ exports.getSongVersions = async (req, res) => {
 
     const versions = versionSongs.map((s) => {
       const rels = relMap[s.id] || { singers: [], lyricists: [], musicians: [] };
+      const parsedLabels = songLabelsMap[s.id] || [];
       return {
         id: s.id,
         versionName: s.versionName || toTitleCase(s.name),
@@ -1129,6 +1132,8 @@ exports.getSongVersions = async (req, res) => {
         artistSub: rels.singers.length > 1 ? 'Due - Second Artist' : '',
         lyrics: rels.lyricists.length > 0 ? rels.lyricists.join(', ') : 'None',
         music: rels.musicians.length > 0 ? rels.musicians.join(', ') : 'None',
+        labels: parsedLabels,
+        recordLabels: parsedLabels,
         ownership: s.ownership || 100,
         notes: s.notes || 'No Cases Or Notes',
         conflicts: s.conflict || 'No',
@@ -1316,6 +1321,128 @@ exports.deleteSongConflict = async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('Error deleting song conflict:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+function formatImage(pathStr, host) {
+  if (!pathStr) return null;
+  if (pathStr.startsWith('http://') || pathStr.startsWith('https://') || pathStr.startsWith('data:')) return pathStr;
+  const cleanPath = pathStr.replace(/\\/g, '/');
+  return cleanPath.startsWith('/') ? `${host}${cleanPath}` : `${host}/${cleanPath}`;
+}
+
+// GET /songs/:id/albums (Song related albums & unique record labels)
+exports.getSongAlbumsAndLabels = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+
+    const host = `${req.protocol}://${req.get('host')}`;
+
+    // 1. Fetch active, non-deleted songalbum records joined with non-deleted album & record_label details
+    const [rows] = await pool.query(`
+      SELECT 
+        a.id as album_id,
+        a.name as album_name,
+        a.image_url as album_image,
+        a.record_label_id,
+        rl.id as label_id,
+        COALESCE(rl.display_name, rl.name) as label_name,
+        rl.image_url as label_image,
+        (SELECT COUNT(DISTINCT sa_count.song_id) 
+         FROM songalbum sa_count 
+         JOIN songs s_count ON sa_count.song_id = s_count.id AND (s_count.status = 1 OR s_count.status IS NULL)
+         WHERE sa_count.album_id = a.id 
+           AND (sa_count.status = 1 OR sa_count.status IS NULL) 
+           AND (sa_count.is_delete = 0 OR sa_count.is_delete IS NULL)
+        ) as track_count
+      FROM songalbum sa
+      JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+      LEFT JOIN record_label rl ON a.record_label_id = rl.id 
+        AND (rl.status = 1 OR rl.status IS NULL) 
+        AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+      WHERE sa.song_id = ? 
+        AND (sa.status = 1 OR sa.status IS NULL) 
+        AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+      ORDER BY a.name ASC
+    `, [songId]);
+
+    const albumsMap = {};
+    const recordLabelsMap = {};
+
+    rows.forEach(r => {
+      // Album object
+      if (!albumsMap[r.album_id]) {
+        const albumImg = formatImage(r.album_image, host);
+        const labelImg = formatImage(r.label_image, host);
+        albumsMap[r.album_id] = {
+          id: r.album_id,
+          name: toTitleCase(r.album_name),
+          image_url: albumImg,
+          imageUrl: albumImg,
+          coverUrl: albumImg,
+          record_label_id: r.record_label_id,
+          recordLabelName: toTitleCase(r.label_name || '—'),
+          recordLabelImage: labelImg,
+          track_count: r.track_count || 0,
+          songsCount: r.track_count || 0,
+          tracks: `${r.track_count || 0} Tracks`,
+          year: '2022'
+        };
+      }
+
+      // Unique Record Label object
+      if (r.label_id && !recordLabelsMap[r.label_id]) {
+        const labelImg = formatImage(r.label_image, host);
+        const labelName = toTitleCase(r.label_name || '');
+        recordLabelsMap[r.label_id] = {
+          id: r.label_id,
+          name: labelName,
+          display_name: labelName,
+          image_url: labelImg,
+          imageUrl: labelImg
+        };
+      }
+    });
+
+    const albums = Object.values(albumsMap);
+    const recordLabels = Object.values(recordLabelsMap);
+
+    res.json({
+      albums,
+      recordLabels
+    });
+  } catch (error) {
+    console.error('Error fetching song albums and labels:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// DELETE /songs/:id/albums/:albumId (Soft delete song-album relationship)
+exports.removeSongAlbumRelationship = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    const albumId = parseInt(req.params.albumId, 10);
+
+    if (isNaN(songId) || isNaN(albumId)) {
+      return res.status(400).json({ message: 'Invalid song ID or album ID' });
+    }
+
+    await pool.query(`
+      UPDATE songalbum
+      SET status = 0, is_delete = 1
+      WHERE song_id = ? AND album_id = ?
+    `, [songId, albumId]);
+
+    res.json({ success: true, message: 'Album removed from song successfully' });
+  } catch (error) {
+    console.error('Error removing song album relationship:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 };

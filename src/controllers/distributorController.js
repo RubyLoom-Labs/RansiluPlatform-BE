@@ -101,18 +101,53 @@ exports.getDistributors = async (req, res) => {
       [rows] = await pool.query(dataQuery, [...queryParams, limit, offset]);
     }
 
+    const distIds = rows.map(r => r.id);
+    let distLabelsMap = {};
+    if (distIds.length > 0) {
+      const host = `${req.protocol}://${req.get('host')}`;
+      const [distLabelRows] = await pool.query(`
+        SELECT DISTINCT sd.distributor_id, rl.id as label_id, COALESCE(rl.display_name, rl.name) as label_name, rl.image_url as label_image
+        FROM songdistributor sd
+        JOIN songalbum sa ON sd.song_id = sa.song_id AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+        JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+        JOIN record_label rl ON a.record_label_id = rl.id 
+          AND (rl.status = 1 OR rl.status IS NULL) 
+          AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+        WHERE sd.distributor_id IN (?) AND sd.status = 1 AND sd.is_deleted = 0
+      `, [distIds]);
+
+      distLabelRows.forEach(rel => {
+        if (!distLabelsMap[rel.distributor_id]) distLabelsMap[rel.distributor_id] = [];
+        if (rel.label_name && !distLabelsMap[rel.distributor_id].some(l => String(l.id) === String(rel.label_id))) {
+          const img = rel.label_image;
+          const formattedImg = formatImage(img, host);
+          distLabelsMap[rel.distributor_id].push({
+            id: rel.label_id,
+            name: toTitleCase(rel.label_name),
+            imageUrl: formattedImg,
+            image_url: formattedImg
+          });
+        }
+      });
+    }
+
     res.json({
-      distributors: rows.map(r => ({
-        id: r.id,
-        distributor_code: r.distributor_code,
-        email: r.email,
-        company: toTitleCase(r.company_name),
-        songCount: r.songCount || 0,
-        percentage: r.outgoing_percentage,
-        status: r.status === 1 || r.status === true ? 'Active' : 'Inactive',
-        notes: '0 notes',
-        conflicts: `${r.conflictCount || 0} ${r.conflictCount === 1 ? 'conflict' : 'conflicts'}`
-      })),
+      distributors: rows.map(r => {
+        const parsedLabels = distLabelsMap[r.id] || [];
+        return {
+          id: r.id,
+          distributor_code: r.distributor_code,
+          email: r.email,
+          company: toTitleCase(r.company_name),
+          labels: parsedLabels,
+          recordLabels: parsedLabels,
+          songCount: r.songCount || 0,
+          percentage: r.outgoing_percentage,
+          status: r.status === 1 || r.status === true ? 'Active' : 'Inactive',
+          notes: '0 notes',
+          conflicts: `${r.conflictCount || 0} ${r.conflictCount === 1 ? 'conflict' : 'conflicts'}`
+        };
+      }),
       totalCount
     });
   } catch (error) {
@@ -568,22 +603,83 @@ exports.getDistributorConflicts = async (req, res) => {
       [distributorId]
     );
 
+    const host = `${req.protocol}://${req.get('host')}`;
+    const songIds = rows.map(r => r.songId);
+    const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
+
     res.json({
-      conflicts: rows.map(r => ({
-        id: r.conflictId,
-        songId: r.songId,
-        name: toTitleCase(r.name),
-        artist: toTitleCase(r.artist) || 'Unknown Artist',
-        lyrics: toTitleCase(r.lyricist) || '—',
-        music: toTitleCase(r.musician) || '—',
-        ownership: r.ownership ? `${r.ownership}%` : '100%',
-        conflictOwner: toTitleCase(r.conflictOwner) || '—',
-        copyrightConflict: r.copyrightConflict || 'Sound Records',
-        notes: r.notes || 'No Cases Or Notes'
-      }))
+      conflicts: rows.map(r => {
+        const parsedLabels = songLabelsMap[r.songId] || [];
+        return {
+          id: r.conflictId,
+          songId: r.songId,
+          name: toTitleCase(r.name),
+          artist: toTitleCase(r.artist) || 'Unknown Artist',
+          lyrics: toTitleCase(r.lyricist) || '—',
+          music: toTitleCase(r.musician) || '—',
+          labels: parsedLabels,
+          recordLabels: parsedLabels,
+          ownership: r.ownership ? `${r.ownership}%` : '100%',
+          conflictOwner: toTitleCase(r.conflictOwner) || '—',
+          copyrightConflict: r.copyrightConflict || 'Sound Records',
+          notes: r.notes || 'No Cases Or Notes'
+        };
+      })
     });
   } catch (error) {
     console.error('Error fetching distributor conflicts:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// GET /distributor/:id/labels (Unique record labels associated with songs under this distributor)
+exports.getDistributorLabels = async (req, res) => {
+  try {
+    const pool = getPool();
+    const distributorId = parseInt(req.params.id, 10);
+
+    if (isNaN(distributorId)) {
+      return res.status(400).json({ message: 'Invalid distributor ID' });
+    }
+
+    const host = `${req.protocol}://${req.get('host')}`;
+
+    const [rows] = await pool.query(`
+      SELECT 
+        rl.id, 
+        COALESCE(rl.display_name, rl.name) as label_name, 
+        rl.image_url as label_image,
+        COUNT(DISTINCT sd.song_id) as song_count
+      FROM songdistributor sd
+      JOIN songs s ON sd.song_id = s.id AND (s.status = 1 OR s.status IS NULL)
+      JOIN songalbum sa ON s.id = sa.song_id AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+      JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+      JOIN record_label rl ON a.record_label_id = rl.id 
+        AND (rl.status = 1 OR rl.status IS NULL) 
+        AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+      WHERE sd.distributor_id = ? 
+        AND (sd.status = 1 OR sd.status IS NULL) 
+        AND (sd.is_deleted = 0 OR sd.is_deleted IS NULL)
+      GROUP BY rl.id, rl.display_name, rl.name, rl.image_url
+      ORDER BY label_name ASC
+    `, [distributorId]);
+
+    const labels = rows.map(r => {
+      const img = formatImage(r.label_image, host);
+      const name = toTitleCase(r.label_name || 'Record Label');
+      return {
+        id: r.id,
+        name,
+        display_name: name,
+        image_url: img,
+        imageUrl: img,
+        songCount: r.song_count || 0
+      };
+    });
+
+    res.json({ labels });
+  } catch (error) {
+    console.error('Error fetching distributor labels:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 };

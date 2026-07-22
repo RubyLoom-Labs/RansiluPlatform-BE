@@ -450,3 +450,204 @@ exports.getArtistById = async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+function formatImage(img, host) {
+  if (!img || typeof img !== 'string') return null;
+  const trimmed = img.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('http') || trimmed.startsWith('data:')) return trimmed;
+  return `${host}${trimmed.startsWith('/') ? '' : '/'}${trimmed}`;
+}
+
+function toTitleCase(str) {
+  if (!str) return '';
+  return str
+    .toLowerCase()
+    .split(' ')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+async function fetchSongLabelsMap(songIds, pool, host) {
+  if (!Array.isArray(songIds) || songIds.length === 0) return {};
+  const [labelRelations] = await pool.query(`
+    SELECT sa.song_id, rl.id as label_id, COALESCE(rl.display_name, rl.name) as label_name, rl.image_url as label_image
+    FROM songalbum sa
+    JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+    JOIN record_label rl ON a.record_label_id = rl.id 
+      AND (rl.status = 1 OR rl.status IS NULL) 
+      AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+    WHERE sa.song_id IN (?) AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+  `, [songIds]);
+
+  const songLabels = {};
+  labelRelations.forEach((rel) => {
+    if (!songLabels[rel.song_id]) {
+      songLabels[rel.song_id] = [];
+    }
+    if (rel.label_name && !songLabels[rel.song_id].some(l => String(l.id) === String(rel.label_id))) {
+      const img = rel.label_image;
+      const formattedImg = formatImage(img, host);
+      songLabels[rel.song_id].push({
+        id: rel.label_id,
+        name: toTitleCase(rel.label_name),
+        imageUrl: formattedImg,
+        image_url: formattedImg
+      });
+    }
+  });
+
+  return songLabels;
+}
+
+// GET /artists/:id/songs (Lazy-loaded songs with pagination)
+exports.getArtistSongs = async (req, res) => {
+  try {
+    const pool = getPool();
+    const artistId = parseInt(req.params.id, 10);
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 20;
+    const offset = (page - 1) * limit;
+
+    if (isNaN(artistId)) {
+      return res.status(400).json({ message: 'Invalid artist ID' });
+    }
+
+    const host = `${req.protocol}://${req.get('host')}`;
+
+    // Count query for total songs
+    const [countRows] = await pool.query(`
+      SELECT COUNT(DISTINCT rel.song_id) as total
+      FROM (
+        SELECT song_id FROM songSinger WHERE artist_id = ?
+        UNION
+        SELECT song_id FROM songLyrics WHERE artist_id = ?
+        UNION
+        SELECT song_id FROM songmusician WHERE artist_id = ?
+      ) as rel
+      JOIN songs s ON rel.song_id = s.id AND (s.status = 1 OR s.status IS NULL)
+    `, [artistId, artistId, artistId]);
+
+    const totalCount = countRows[0] ? countRows[0].total : 0;
+
+    const [rows] = await pool.query(`
+      SELECT DISTINCT s.id, s.name, s.imageUrl, s.isrcCode, s.versionType, s.ownership,
+             (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songSinger ss JOIN artists art ON ss.artist_id = art.id WHERE ss.song_id = s.id) as artist,
+             (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songLyrics sl JOIN artists art ON sl.artist_id = art.id WHERE sl.song_id = s.id) as lyricist,
+             (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songmusician sm JOIN artists art ON sm.artist_id = art.id WHERE sm.song_id = s.id) as musician
+      FROM (
+        SELECT song_id FROM songSinger WHERE artist_id = ?
+        UNION
+        SELECT song_id FROM songLyrics WHERE artist_id = ?
+        UNION
+        SELECT song_id FROM songmusician WHERE artist_id = ?
+      ) as rel
+      JOIN songs s ON rel.song_id = s.id AND (s.status = 1 OR s.status IS NULL)
+      ORDER BY s.name ASC
+      LIMIT ? OFFSET ?
+    `, [artistId, artistId, artistId, limit, offset]);
+
+    const songIds = rows.map(s => s.id);
+    const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
+
+    const formattedSongs = rows.map(s => {
+      const parsedLabels = songLabelsMap[s.id] || [];
+      return {
+        id: s.id,
+        name: toTitleCase(s.name),
+        artist: toTitleCase(s.artist) || 'Unknown Artist',
+        lyrics: toTitleCase(s.lyricist) || '—',
+        music: toTitleCase(s.musician) || '—',
+        imageUrl: formatImage(s.imageUrl, host),
+        image_url: formatImage(s.imageUrl, host),
+        duration: '03:45',
+        isrcCode: s.isrcCode || '—',
+        versionType: s.versionType || 'Original',
+        ownership: s.ownership || 100,
+        labels: parsedLabels,
+        recordLabels: parsedLabels,
+        labelNames: parsedLabels.map(l => l.name).join(', ') || 'None'
+      };
+    });
+
+    res.json({
+      songs: formattedSongs,
+      totalCount,
+      hasMore: offset + formattedSongs.length < totalCount
+    });
+  } catch (error) {
+    console.error('Error fetching artist songs:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// GET /artists/:id/albums (Lazy-loaded albums for selected artist)
+exports.getArtistAlbums = async (req, res) => {
+  try {
+    const pool = getPool();
+    const artistId = parseInt(req.params.id, 10);
+
+    if (isNaN(artistId)) {
+      return res.status(400).json({ message: 'Invalid artist ID' });
+    }
+
+    const host = `${req.protocol}://${req.get('host')}`;
+
+    const [rows] = await pool.query(`
+      SELECT DISTINCT 
+        a.id, 
+        a.name, 
+        a.image_url as image_url, 
+        a.record_label_id,
+        COALESCE(rl.display_name, rl.name) as record_label_name,
+        rl.image_url as record_label_image,
+        (SELECT COUNT(DISTINCT sa_count.song_id) 
+         FROM songalbum sa_count 
+         JOIN songs s_count ON sa_count.song_id = s_count.id AND (s_count.status = 1 OR s_count.status IS NULL)
+         WHERE sa_count.album_id = a.id AND (sa_count.status = 1 OR sa_count.status IS NULL) AND (sa_count.is_delete = 0 OR sa_count.is_delete IS NULL)
+        ) as track_count
+      FROM (
+        SELECT song_id FROM songSinger WHERE artist_id = ?
+        UNION
+        SELECT song_id FROM songLyrics WHERE artist_id = ?
+        UNION
+        SELECT song_id FROM songmusician WHERE artist_id = ?
+      ) as artist_songs
+      JOIN songalbum sa ON artist_songs.song_id = sa.song_id AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+      JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+      LEFT JOIN record_label rl ON a.record_label_id = rl.id AND (rl.status = 1 OR rl.status IS NULL) AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+      ORDER BY a.name ASC
+    `, [artistId, artistId, artistId]);
+
+    const formattedAlbums = rows.map(a => {
+      const albumImg = formatImage(a.image_url, host);
+      const labelImg = formatImage(a.record_label_image, host);
+      return {
+        id: a.id,
+        name: toTitleCase(a.name),
+        image_url: albumImg,
+        imageUrl: albumImg,
+        coverUrl: albumImg,
+        track_count: a.track_count || 0,
+        songsCount: a.track_count || 0,
+        record_label: a.record_label_id ? {
+          id: a.record_label_id,
+          name: toTitleCase(a.record_label_name || ''),
+          display_name: toTitleCase(a.record_label_name || ''),
+          image_url: labelImg,
+          imageUrl: labelImg
+        } : null,
+        recordLabelName: toTitleCase(a.record_label_name || '—'),
+        recordLabelImage: labelImg
+      };
+    });
+
+    res.json({
+      albums: formattedAlbums,
+      totalCount: formattedAlbums.length
+    });
+  } catch (error) {
+    console.error('Error fetching artist albums:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};

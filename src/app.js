@@ -9,6 +9,7 @@ const recordLabelRoutes = require('./routes/recordLabelRoutes');
 const albumRoutes = require('./routes/albumRoutes');
 const eAccountRoutes = require('./routes/eAccountRoutes');
 const calendarRoutes = require('./routes/calendarRoutes');
+const revenueRoutes = require('./routes/revenueRoutes');
 
 const app = express();
 
@@ -32,6 +33,7 @@ app.use('/api/recode-labels', recordLabelRoutes);
 app.use('/api/albums', albumRoutes);
 app.use('/api/e-accounts', eAccountRoutes);
 app.use('/api/calendar/events', calendarRoutes);
+app.use('/api/revenue', revenueRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

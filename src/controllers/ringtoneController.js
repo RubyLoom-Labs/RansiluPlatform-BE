@@ -346,6 +346,42 @@ exports.deleteRingtone = async (req, res) => {
   }
 };
 
+function formatImage(img, host) {
+  return img ? (img.startsWith('http') || img.startsWith('data:') ? img : `${host}${img.startsWith('/') ? '' : '/'}${img}`) : null;
+}
+
+async function fetchSongLabelsMap(songIds, pool, host) {
+  if (!Array.isArray(songIds) || songIds.length === 0) return {};
+  const [labelRelations] = await pool.query(`
+    SELECT sa.song_id, rl.id as label_id, COALESCE(rl.display_name, rl.name) as label_name, rl.image_url as label_image
+    FROM songalbum sa
+    JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+    JOIN record_label rl ON a.record_label_id = rl.id 
+      AND (rl.status = 1 OR rl.status IS NULL) 
+      AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+    WHERE sa.song_id IN (?) AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+  `, [songIds]);
+
+  const songLabels = {};
+  labelRelations.forEach((rel) => {
+    if (!songLabels[rel.song_id]) {
+      songLabels[rel.song_id] = [];
+    }
+    if (rel.label_name && !songLabels[rel.song_id].some(l => String(l.id) === String(rel.label_id))) {
+      const img = rel.label_image;
+      const formattedImg = formatImage(img, host);
+      songLabels[rel.song_id].push({
+        id: rel.label_id,
+        name: toTitleCase(rel.label_name),
+        imageUrl: formattedImg,
+        image_url: formattedImg
+      });
+    }
+  });
+
+  return songLabels;
+}
+
 // Get songs mapping to selected ringtone
 exports.getRingtoneSongs = async (req, res) => {
   try {
@@ -360,12 +396,17 @@ exports.getRingtoneSongs = async (req, res) => {
       return res.status(400).json({ message: 'Invalid operator ID' });
     }
 
+    const host = `${req.protocol}://${req.get('host')}`;
+
     // Check total count of active songs mapping to this ringtone (exclude deleted)
     const [countRows] = await pool.query(
       `SELECT COUNT(*) as total
        FROM songringintone sr
        JOIN songs s ON sr.song_id = s.id
-       WHERE sr.ringintone_id = ? AND sr.status = 1 AND sr.is_deleted = 0 AND s.status = 1`,
+       WHERE sr.ringintone_id = ? 
+         AND (sr.status = 1 OR sr.status IS NULL) 
+         AND (sr.is_deleted = 0 OR sr.is_deleted IS NULL) 
+         AND (s.status = 1 OR s.status IS NULL)`,
       [ringtoneId]
     );
     const totalCount = countRows[0].total;
@@ -383,9 +424,12 @@ exports.getRingtoneSongs = async (req, res) => {
              s.ownership
       FROM songringintone sr
       JOIN songs s ON sr.song_id = s.id
-      LEFT JOIN songdistributor sd ON s.id = sd.song_id AND sd.status = 1 AND sd.is_deleted = 0
+      LEFT JOIN songdistributor sd ON s.id = sd.song_id AND (sd.status = 1 OR sd.status IS NULL) AND (sd.is_deleted = 0 OR sd.is_deleted IS NULL)
       LEFT JOIN distributors dist ON sd.distributor_id = dist.id
-      WHERE sr.ringintone_id = ? AND sr.status = 1 AND sr.is_deleted = 0 AND s.status = 1
+      WHERE sr.ringintone_id = ? 
+        AND (sr.status = 1 OR sr.status IS NULL) 
+        AND (sr.is_deleted = 0 OR sr.is_deleted IS NULL) 
+        AND (s.status = 1 OR s.status IS NULL)
       ORDER BY s.name ASC
     `;
 
@@ -397,20 +441,29 @@ exports.getRingtoneSongs = async (req, res) => {
       [rows] = await pool.query(dataQuery, [ringtoneId, limit, offset]);
     }
 
+    const songIds = rows.map(s => s.id);
+    const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
+
     res.json({
-      songs: rows.map(s => ({
-        id: s.id,
-        name: toTitleCase(s.name),
-        artist: toTitleCase(s.artist) || 'Unknown Artist',
-        lyrics: toTitleCase(s.lyricist) || '—',
-        music: toTitleCase(s.musician) || '—',
-        album: s.album || '—',
-        distributor: toTitleCase(s.distributor) || '—',
-        releaseDate: s.release_date ? (typeof s.release_date === 'object' ? s.release_date.toISOString().split('T')[0] : String(s.release_date).split('T')[0]) : '—',
-        isrcCode: s.isrcCode || '—',
-        versionType: s.versionType || 'Original',
-        ownership: s.ownership || 100
-      })),
+      songs: rows.map(s => {
+        const parsedLabels = songLabelsMap[s.id] || [];
+        return {
+          id: s.id,
+          name: toTitleCase(s.name),
+          artist: toTitleCase(s.artist) || 'Unknown Artist',
+          lyrics: toTitleCase(s.lyricist) || '—',
+          music: toTitleCase(s.musician) || '—',
+          album: s.album || '—',
+          labels: parsedLabels,
+          recordLabels: parsedLabels,
+          labelNames: parsedLabels.map(l => l.name).join(', ') || 'None',
+          distributor: toTitleCase(s.distributor) || '—',
+          releaseDate: s.release_date ? (typeof s.release_date === 'object' ? s.release_date.toISOString().split('T')[0] : String(s.release_date).split('T')[0]) : '—',
+          isrcCode: s.isrcCode || '—',
+          versionType: s.versionType || 'Original',
+          ownership: s.ownership || 100
+        };
+      }),
       totalCount
     });
   } catch (error) {

@@ -180,12 +180,42 @@ exports.getSongs = async (req, res) => {
       };
     });
 
-    // 4. Map songs to the shape expected by the frontend
+    // 3.3 Fetch active album record label relations
     const host = `${req.protocol}://${req.get('host')}`;
+    const [labelRelations] = await pool.query(`
+      SELECT sa.song_id, rl.id as label_id, COALESCE(rl.display_name, rl.name) as label_name, rl.image_url as label_image
+      FROM songalbum sa
+      JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+      JOIN record_label rl ON a.record_label_id = rl.id 
+        AND (rl.status = 1 OR rl.status IS NULL) 
+        AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+      WHERE sa.song_id IN (?) AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+    `, [songIds]);
+
+    const songLabels = {};
+    labelRelations.forEach((rel) => {
+      if (!songLabels[rel.song_id]) {
+        songLabels[rel.song_id] = [];
+      }
+      if (rel.label_name && !songLabels[rel.song_id].some(l => String(l.id) === String(rel.label_id))) {
+        const img = rel.label_image;
+        const formattedImg = img ? (img.startsWith('http') || img.startsWith('data:') ? img : `${host}${img.startsWith('/') ? '' : '/'}${img}`) : null;
+        songLabels[rel.song_id].push({
+          id: rel.label_id,
+          name: toTitleCase(rel.label_name),
+          imageUrl: formattedImg,
+          image_url: formattedImg
+        });
+      }
+    });
+
+    // 4. Map songs to the shape expected by the frontend
     const formattedSongs = songs.map((song) => {
       const rels = songRelations[song.id] || { singers: [], lyricists: [], musicians: [] };
       const dist = songDistributors[song.id] || null;
       const ring = songRingtones[song.id] || null;
+      const labelList = songLabels[song.id] || [];
+      const labelsText = labelList.map(l => l.name).join(', ') || 'None';
 
       return {
         id: song.id,
@@ -196,6 +226,9 @@ exports.getSongs = async (req, res) => {
         artistSub: rels.singers.length > 1 ? 'Due - Second Artist' : '',
         lyrics: rels.lyricists.length > 0 ? rels.lyricists.join(', ') : 'None',
         music: rels.musicians.length > 0 ? rels.musicians.join(', ') : 'None',
+        labels: labelList,
+        recordLabels: labelList,
+        labelNames: labelsText,
         ownership: song.ownership || 100,
         notes: song.notes || 'No Cases Or Notes',
         conflict: song.conflict || 'No',
@@ -567,7 +600,30 @@ exports.getSongById = async (req, res) => {
     // Backward compat: first ringtone entry as flat fields
     const activeRing = ringRows[0] || null;
 
+    // Fetch active record labels (from songalbum->album->record_label)
     const host = `${req.protocol}://${req.get('host')}`;
+    const [labelRows] = await pool.query(`
+      SELECT DISTINCT rl.id, COALESCE(rl.display_name, rl.name) as label_name, rl.image_url as label_image
+      FROM songalbum sa
+      JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+      JOIN record_label rl ON a.record_label_id = rl.id 
+        AND (rl.status = 1 OR rl.status IS NULL) 
+        AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+      WHERE sa.song_id = ? AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+    `, [songId]);
+
+    const labelList = labelRows.map(r => {
+      const img = r.label_image;
+      const formattedImg = img ? (img.startsWith('http') || img.startsWith('data:') ? img : `${host}${img.startsWith('/') ? '' : '/'}${img}`) : null;
+      return {
+        id: r.id,
+        name: toTitleCase(r.label_name),
+        imageUrl: formattedImg,
+        image_url: formattedImg
+      };
+    });
+    const labelsText = labelList.map(l => l.name).join(', ') || 'None';
+
     res.json({
       id: song.id,
       name: toTitleCase(song.name), // Title Case song name on fetch
@@ -586,6 +642,9 @@ exports.getSongById = async (req, res) => {
       addedDate: activeRing && activeRing.added_date ? (typeof activeRing.added_date === 'object' ? activeRing.added_date.toISOString().split('T')[0] : String(activeRing.added_date).split('T')[0]) : null,
       ringintoneId: activeRing ? String(activeRing.ringintone_id) : null,
       ringtones,
+      labels: labelList,
+      recordLabels: labelList,
+      labelNames: labelsText,
       trackUrl: song.trackUrl ? (song.trackUrl.startsWith('http') ? song.trackUrl : `${host}${song.trackUrl}`) : null,
       imageUrl: song.imageUrl ? (song.imageUrl.startsWith('http') ? song.imageUrl : `${host}${song.imageUrl}`) : null,
       singers: singers.map(s => String(s.artist_id)),

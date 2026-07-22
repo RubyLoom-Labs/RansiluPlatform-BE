@@ -10,6 +10,23 @@ function toTitleCase(str) {
     .join(' ');
 }
 
+function parseRawLabels(rawStr, host) {
+  if (!rawStr) return [];
+  return rawStr.split('|||').map(entry => {
+    const parts = entry.split(':::');
+    const id = parts[0] ? parseInt(parts[0], 10) : null;
+    const name = parts[1] || '';
+    const img = parts[2] || null;
+    const formattedImg = img ? (img.startsWith('http') || img.startsWith('data:') ? img : `${host}${img.startsWith('/') ? '' : '/'}${img}`) : null;
+    return {
+      id,
+      name: toTitleCase(name),
+      imageUrl: formattedImg,
+      image_url: formattedImg
+    };
+  }).filter(l => l.name);
+}
+
 // Function to generate the next sequential distributor code
 async function generateDistributorCode(pool) {
   const [rows] = await pool.query(
@@ -130,7 +147,43 @@ exports.getDistributorById = async (req, res) => {
   }
 };
 
-// Get distributor songs (paginated, active + inactive, excluding is_deleted = 1)
+function formatImage(img, host) {
+  return img ? (img.startsWith('http') || img.startsWith('data:') ? img : `${host}${img.startsWith('/') ? '' : '/'}${img}`) : null;
+}
+
+async function fetchSongLabelsMap(songIds, pool, host) {
+  if (!Array.isArray(songIds) || songIds.length === 0) return {};
+  const [labelRelations] = await pool.query(`
+    SELECT sa.song_id, rl.id as label_id, COALESCE(rl.display_name, rl.name) as label_name, rl.image_url as label_image
+    FROM songalbum sa
+    JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+    JOIN record_label rl ON a.record_label_id = rl.id 
+      AND (rl.status = 1 OR rl.status IS NULL) 
+      AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+    WHERE sa.song_id IN (?) AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+  `, [songIds]);
+
+  const songLabels = {};
+  labelRelations.forEach((rel) => {
+    if (!songLabels[rel.song_id]) {
+      songLabels[rel.song_id] = [];
+    }
+    if (rel.label_name && !songLabels[rel.song_id].some(l => String(l.id) === String(rel.label_id))) {
+      const img = rel.label_image;
+      const formattedImg = formatImage(img, host);
+      songLabels[rel.song_id].push({
+        id: rel.label_id,
+        name: toTitleCase(rel.label_name),
+        imageUrl: formattedImg,
+        image_url: formattedImg
+      });
+    }
+  });
+
+  return songLabels;
+}
+
+// GET /distributor/:id/songs
 exports.getDistributorSongs = async (req, res) => {
   try {
     const pool = getPool();
@@ -143,6 +196,8 @@ exports.getDistributorSongs = async (req, res) => {
     if (isNaN(distributorId)) {
       return res.status(400).json({ message: 'Invalid distributor ID' });
     }
+
+    const host = `${req.protocol}://${req.get('host')}`;
 
     // Count query
     const [countRows] = await pool.query(
@@ -179,20 +234,29 @@ exports.getDistributorSongs = async (req, res) => {
       [rows] = await pool.query(dataQuery, [distributorId, limit, offset]);
     }
 
+    const songIds = rows.map(s => s.id);
+    const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
+
     res.json({
-      songs: rows.map(s => ({
-        id: s.id,
-        name: toTitleCase(s.name),
-        artist: toTitleCase(s.artist) || 'Unknown Artist',
-        lyrics: toTitleCase(s.lyricist) || '—',
-        music: toTitleCase(s.musician) || '—',
-        album: s.album || '—',
-        releaseDate: s.release_date ? (typeof s.release_date === 'object' ? s.release_date.toISOString().split('T')[0] : String(s.release_date).split('T')[0]) : '—',
-        isrcCode: s.isrcCode || '—',
-        versionType: s.versionType || 'Original',
-        ownership: s.ownership || 100,
-        status: s.mapping_status === 1 || s.mapping_status === true ? 'Active' : 'Inactive'
-      })),
+      songs: rows.map(s => {
+        const parsedLabels = songLabelsMap[s.id] || [];
+        return {
+          id: s.id,
+          name: toTitleCase(s.name),
+          artist: toTitleCase(s.artist) || 'Unknown Artist',
+          lyrics: toTitleCase(s.lyricist) || '—',
+          music: toTitleCase(s.musician) || '—',
+          album: s.album || '—',
+          labels: parsedLabels,
+          recordLabels: parsedLabels,
+          labelNames: parsedLabels.map(l => l.name).join(', ') || 'None',
+          releaseDate: s.release_date ? (typeof s.release_date === 'object' ? s.release_date.toISOString().split('T')[0] : String(s.release_date).split('T')[0]) : '—',
+          isrcCode: s.isrcCode || '—',
+          versionType: s.versionType || 'Original',
+          ownership: s.ownership || 100,
+          status: s.mapping_status === 1 || s.mapping_status === true ? 'Active' : 'Inactive'
+        };
+      }),
       totalCount
     });
   } catch (error) {

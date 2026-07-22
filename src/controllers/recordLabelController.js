@@ -16,6 +16,23 @@ function toSimpleLetters(str) {
   return str.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+function parseRawLabels(rawStr, host) {
+  if (!rawStr) return [];
+  return rawStr.split('|||').map(entry => {
+    const parts = entry.split(':::');
+    const id = parts[0] ? parseInt(parts[0], 10) : null;
+    const name = parts[1] || '';
+    const img = parts[2] || null;
+    const formattedImg = img ? (img.startsWith('http') || img.startsWith('data:') ? img : `${host}${img.startsWith('/') ? '' : '/'}${img}`) : null;
+    return {
+      id,
+      name: toTitleCase(name),
+      imageUrl: formattedImg,
+      image_url: formattedImg
+    };
+  }).filter(l => l.name);
+}
+
 // GET /record-label & GET /record-label/search
 exports.getRecordLabels = async (req, res) => {
   try {
@@ -44,13 +61,17 @@ exports.getRecordLabels = async (req, res) => {
     );
     const totalCount = countRows[0].total;
 
-    // Data query with song count
+    // Data query with song count (via album -> songalbum -> songs)
     let dataQuery = `
       SELECT rl.*,
-             (SELECT COUNT(DISTINCT srl.song_id)
-              FROM songrecordlabel srl
-              JOIN songs s ON srl.song_id = s.id
-              WHERE srl.record_label_id = rl.id AND srl.status = 1 AND srl.is_delete = 0 AND s.status = 1) as songCount
+             (SELECT COUNT(DISTINCT sa.song_id)
+              FROM songalbum sa
+              JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+              JOIN songs s ON sa.song_id = s.id
+              WHERE a.record_label_id = rl.id 
+                AND (sa.status = 1 OR sa.status IS NULL) 
+                AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+                AND s.status = 1) as songCount
       FROM record_label rl
       ${whereClauseStr}
       ORDER BY rl.display_name ASC
@@ -67,7 +88,7 @@ exports.getRecordLabels = async (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
 
     const formattedList = rows.map(r => {
-      const img = r.image_url ? (r.image_url.startsWith('http') || r.image_url.startsWith('data:') ? r.image_url : `${host}${r.image_url}`) : null;
+      const img = r.image_url ? (r.image_url.startsWith('http') || r.image_url.startsWith('data:') ? r.image_url : `${host}${r.image_url.startsWith('/') ? '' : '/'}${r.image_url}`) : null;
       return {
         id: r.id,
         name: r.display_name || toTitleCase(r.name),
@@ -119,10 +140,14 @@ exports.getRecordLabelById = async (req, res) => {
 
     const [rows] = await pool.query(
       `SELECT rl.*,
-              (SELECT COUNT(DISTINCT srl.song_id)
-               FROM songrecordlabel srl
-               JOIN songs s ON srl.song_id = s.id
-               WHERE srl.record_label_id = rl.id AND srl.status = 1 AND srl.is_delete = 0 AND s.status = 1) as songCount
+              (SELECT COUNT(DISTINCT sa.song_id)
+               FROM songalbum sa
+               JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+               JOIN songs s ON sa.song_id = s.id
+               WHERE a.record_label_id = rl.id 
+                 AND (sa.status = 1 OR sa.status IS NULL) 
+                 AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+                 AND s.status = 1) as songCount
        FROM record_label rl
        WHERE rl.id = ? AND rl.is_delete = 0`,
       [id]
@@ -134,7 +159,7 @@ exports.getRecordLabelById = async (req, res) => {
 
     const r = rows[0];
     const host = `${req.protocol}://${req.get('host')}`;
-    const img = r.image_url ? (r.image_url.startsWith('http') || r.image_url.startsWith('data:') ? r.image_url : `${host}${r.image_url}`) : null;
+    const img = r.image_url ? (r.image_url.startsWith('http') || r.image_url.startsWith('data:') ? r.image_url : `${host}${r.image_url.startsWith('/') ? '' : '/'}${r.image_url}`) : null;
 
     res.json({
       id: r.id,
@@ -146,13 +171,46 @@ exports.getRecordLabelById = async (req, res) => {
       status: r.status === 1 || r.status === true ? 'Active' : 'Inactive',
       statusCode: r.status,
       songCount: r.songCount || 0,
-      created_at: r.created_at
+      created_at: r.created_at,
+      updated_at: r.updated_at
     });
   } catch (error) {
-    console.error('Error fetching record label details:', error);
+    console.error('Error fetching record label by ID:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+async function fetchSongLabelsMap(songIds, pool, host) {
+  if (!Array.isArray(songIds) || songIds.length === 0) return {};
+  const [labelRelations] = await pool.query(`
+    SELECT sa.song_id, rl.id as label_id, COALESCE(rl.display_name, rl.name) as label_name, rl.image_url as label_image
+    FROM songalbum sa
+    JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+    JOIN record_label rl ON a.record_label_id = rl.id 
+      AND (rl.status = 1 OR rl.status IS NULL) 
+      AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+    WHERE sa.song_id IN (?) AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+  `, [songIds]);
+
+  const songLabels = {};
+  labelRelations.forEach((rel) => {
+    if (!songLabels[rel.song_id]) {
+      songLabels[rel.song_id] = [];
+    }
+    if (rel.label_name && !songLabels[rel.song_id].some(l => String(l.id) === String(rel.label_id))) {
+      const img = rel.label_image;
+      const formattedImg = img ? (img.startsWith('http') || img.startsWith('data:') ? img : `${host}${img.startsWith('/') ? '' : '/'}${img}`) : null;
+      songLabels[rel.song_id].push({
+        id: rel.label_id,
+        name: toTitleCase(rel.label_name),
+        imageUrl: formattedImg,
+        image_url: formattedImg
+      });
+    }
+  });
+
+  return songLabels;
+}
 
 // GET /record-label/:id/songs
 exports.getRecordLabelSongs = async (req, res) => {
@@ -167,45 +225,64 @@ exports.getRecordLabelSongs = async (req, res) => {
       return res.status(400).json({ message: 'Invalid record label ID' });
     }
 
+    const host = `${req.protocol}://${req.get('host')}`;
+
     const [countRows] = await pool.query(
-      `SELECT COUNT(*) as total
-       FROM songrecordlabel srl
-       JOIN songs s ON srl.song_id = s.id
-       WHERE srl.record_label_id = ? AND srl.status = 1 AND srl.is_delete = 0 AND s.status = 1`,
+      `SELECT COUNT(DISTINCT sa.song_id) as total
+       FROM songalbum sa
+       JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+       JOIN songs s ON sa.song_id = s.id
+       WHERE a.record_label_id = ? 
+         AND (sa.status = 1 OR sa.status IS NULL) 
+         AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+         AND s.status = 1`,
       [labelId]
     );
     const totalCount = countRows[0].total;
 
     const [rows] = await pool.query(
-      `SELECT s.id, s.name, srl.created_at as release_date,
-              (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id = s.id) as artist,
-              (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songLyrics sl JOIN artists a ON sl.artist_id = a.id WHERE sl.song_id = s.id) as lyricist,
-              (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songmusician sm JOIN artists a ON sm.artist_id = a.id WHERE sm.song_id = s.id) as musician,
+      `SELECT DISTINCT s.id, s.name, sa.created_at as release_date,
+              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songSinger ss JOIN artists art ON ss.artist_id = art.id WHERE ss.song_id = s.id) as artist,
+              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songLyrics sl JOIN artists art ON sl.artist_id = art.id WHERE sl.song_id = s.id) as lyricist,
+              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songmusician sm JOIN artists art ON sm.artist_id = art.id WHERE sm.song_id = s.id) as musician,
               s.isrcCode,
               s.versionType,
               s.ownership
-       FROM songrecordlabel srl
-       JOIN songs s ON srl.song_id = s.id
-       WHERE srl.record_label_id = ? AND srl.status = 1 AND srl.is_delete = 0 AND s.status = 1
+       FROM songalbum sa
+       JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+       JOIN songs s ON sa.song_id = s.id
+       WHERE a.record_label_id = ? 
+         AND (sa.status = 1 OR sa.status IS NULL) 
+         AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+         AND s.status = 1
        ORDER BY s.name ASC
        LIMIT ? OFFSET ?`,
       [labelId, limit, offset]
     );
 
+    const songIds = rows.map(s => s.id);
+    const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
+
     res.json({
-      songs: rows.map(s => ({
-        id: s.id,
-        name: toTitleCase(s.name),
-        artist: toTitleCase(s.artist) || 'Unknown Artist',
-        lyrics: toTitleCase(s.lyricist) || '—',
-        music: toTitleCase(s.musician) || '—',
-        album: '—',
-        releaseDate: s.release_date ? String(s.release_date).split('T')[0] : '—',
-        isrcCode: s.isrcCode || '—',
-        versionType: s.versionType || 'Original',
-        ownership: s.ownership || 100,
-        status: 'Active'
-      })),
+      songs: rows.map(s => {
+        const parsedLabels = songLabelsMap[s.id] || [];
+        return {
+          id: s.id,
+          name: toTitleCase(s.name),
+          artist: toTitleCase(s.artist) || 'Unknown Artist',
+          lyrics: toTitleCase(s.lyricist) || '—',
+          music: toTitleCase(s.musician) || '—',
+          album: '—',
+          labels: parsedLabels,
+          recordLabels: parsedLabels,
+          labelNames: parsedLabels.map(l => l.name).join(', ') || 'None',
+          releaseDate: s.release_date ? String(s.release_date).split('T')[0] : '—',
+          isrcCode: s.isrcCode || '—',
+          versionType: s.versionType || 'Original',
+          ownership: s.ownership || 100,
+          status: 'Active'
+        };
+      }),
       totalCount
     });
   } catch (error) {
@@ -248,7 +325,7 @@ exports.createRecordLabel = async (req, res) => {
     );
 
     const host = `${req.protocol}://${req.get('host')}`;
-    const img = image_url ? (image_url.startsWith('http') || image_url.startsWith('data:') ? image_url : `${host}${image_url}`) : null;
+    const img = image_url ? (image_url.startsWith('http') || image_url.startsWith('data:') ? image_url : `${host}${image_url.startsWith('/') ? '' : '/'}${image_url}`) : null;
 
     res.status(201).json({
       message: 'Record label created successfully',
@@ -324,14 +401,18 @@ exports.inactivateRecordLabel = async (req, res) => {
       return res.status(400).json({ message: 'Invalid record label ID' });
     }
 
-    // Check active song relationships in songrecordlabel
+    // Check active song relationships via albums
     const [dependencies] = await pool.query(
-      `SELECT s.id, s.name,
-              (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id = s.id) as artist,
-              '—' as album
-       FROM songrecordlabel srl
-       JOIN songs s ON srl.song_id = s.id
-       WHERE srl.record_label_id = ? AND srl.status = 1 AND srl.is_delete = 0`,
+      `SELECT DISTINCT s.id, s.name,
+              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songSinger ss JOIN artists art ON ss.artist_id = art.id WHERE ss.song_id = s.id) as artist,
+              a.name as album
+       FROM songalbum sa
+       JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+       JOIN songs s ON sa.song_id = s.id
+       WHERE a.record_label_id = ? 
+         AND (sa.status = 1 OR sa.status IS NULL) 
+         AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+         AND s.status = 1`,
       [id]
     );
 
@@ -343,15 +424,13 @@ exports.inactivateRecordLabel = async (req, res) => {
           id: row.id,
           name: toTitleCase(row.name),
           artist: toTitleCase(row.artist) || 'Unknown Artist',
-          album: '—'
+          album: toTitleCase(row.album) || '—'
         }))
       });
     }
 
     // Deactivate record_label
     await pool.query('UPDATE record_label SET status = 0 WHERE id = ?', [id]);
-    // Deactivate related active song relationships
-    await pool.query('UPDATE songrecordlabel SET status = 0 WHERE record_label_id = ? AND status = 1 AND is_delete = 0', [id]);
 
     res.json({
       success: true,
@@ -376,8 +455,6 @@ exports.activateRecordLabel = async (req, res) => {
 
     // Reactivate record_label
     await pool.query('UPDATE record_label SET status = 1, is_delete = 0 WHERE id = ?', [id]);
-    // Reactivate related songrecordlabel relationships if needed
-    await pool.query('UPDATE songrecordlabel SET status = 1 WHERE record_label_id = ? AND is_delete = 0', [id]);
 
     res.json({
       success: true,
@@ -410,14 +487,17 @@ exports.deleteRecordLabel = async (req, res) => {
       return res.status(400).json({ message: 'Active record labels cannot be deleted. Please inactivate first.' });
     }
 
-    // Check related songs in songrecordlabel
+    // Check related songs via album
     const [dependencies] = await pool.query(
-      `SELECT s.id, s.name,
-              (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id = s.id) as artist,
-              '—' as album
-       FROM songrecordlabel srl
-       JOIN songs s ON srl.song_id = s.id
-       WHERE srl.record_label_id = ? AND srl.is_delete = 0`,
+      `SELECT DISTINCT s.id, s.name,
+              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songSinger ss JOIN artists art ON ss.artist_id = art.id WHERE ss.song_id = s.id) as artist,
+              a.name as album
+       FROM songalbum sa
+       JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+       JOIN songs s ON sa.song_id = s.id
+       WHERE a.record_label_id = ? 
+         AND (sa.status = 1 OR sa.status IS NULL) 
+         AND (sa.is_delete = 0 OR sa.is_delete IS NULL)`,
       [id]
     );
 
@@ -429,14 +509,13 @@ exports.deleteRecordLabel = async (req, res) => {
           id: row.id,
           name: toTitleCase(row.name),
           artist: toTitleCase(row.artist) || 'Unknown Artist',
-          album: '—'
+          album: toTitleCase(row.album) || '—'
         }))
       });
     }
 
     // Soft delete
     await pool.query('UPDATE record_label SET is_delete = 1 WHERE id = ?', [id]);
-    await pool.query('UPDATE songrecordlabel SET is_delete = 1 WHERE record_label_id = ?', [id]);
 
     res.json({
       success: true,

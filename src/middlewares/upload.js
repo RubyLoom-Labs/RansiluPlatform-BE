@@ -6,6 +6,7 @@ const fs = require('fs');
 const uploadDirs = {
   images: path.join(__dirname, '../../uploads/images'),
   audio: path.join(__dirname, '../../uploads/audio'),
+  documents: path.join(__dirname, '../../uploads/documents'),
 };
 
 for (const dir of Object.values(uploadDirs)) {
@@ -22,41 +23,26 @@ const storage = multer.diskStorage({
     } else if (file.fieldname === 'image' || file.fieldname === 'art' || file.fieldname === 'logo') {
       cb(null, uploadDirs.images);
     } else {
-      cb(new Error('Unexpected field name for upload'), null);
+      // Default to documents directory for any document/other uploads
+      cb(null, uploadDirs.documents);
     }
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+    cb(null, (file.fieldname || 'doc') + '-' + uniqueSuffix + path.extname(file.originalname));
   },
 });
 
 // File validation helper
 const fileFilter = (req, file, cb) => {
-  if (file.fieldname === 'track') {
-    // Expect MP3 audio file
-    if (file.mimetype === 'audio/mpeg' || file.originalname.endsWith('.mp3')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only MP3 tracks are allowed!'), false);
-    }
-  } else if (file.fieldname === 'image' || file.fieldname === 'art' || file.fieldname === 'logo') {
-    // Expect Image file or PDF (since company logo could be a PDF)
-    if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf' || file.originalname.endsWith('.pdf')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only images and PDF files are allowed!'), false);
-    }
-  } else {
-    cb(new Error('Unknown upload field'), false);
-  }
+  cb(null, true);
 };
 
 const upload = multer({
   storage,
   fileFilter,
   limits: {
-    fileSize: 15 * 1024 * 1024, // 15MB limit
+    fileSize: 25 * 1024 * 1024, // 25MB limit
   },
 });
 

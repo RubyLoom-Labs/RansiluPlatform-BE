@@ -10,6 +10,7 @@ const albumRoutes = require('./routes/albumRoutes');
 const eAccountRoutes = require('./routes/eAccountRoutes');
 const calendarRoutes = require('./routes/calendarRoutes');
 const revenueRoutes = require('./routes/revenueRoutes');
+const ownershipRoutes = require('./routes/ownershipRoutes');
 
 const app = express();
 
@@ -34,6 +35,8 @@ app.use('/api/albums', albumRoutes);
 app.use('/api/e-accounts', eAccountRoutes);
 app.use('/api/calendar/events', calendarRoutes);
 app.use('/api/revenue', revenueRoutes);
+app.use('/api/ownership', ownershipRoutes);
+app.use('/api/ownerships', ownershipRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

@@ -123,6 +123,8 @@ exports.getAlbums = async (req, res) => {
         recordLabelId: r.record_label_id,
         recordLabelName: r.labelName || '—',
         songCount: r.songCount || 0,
+        release_year: r.release_year || '',
+        releaseYear: r.release_year || '',
         status: 'Active',
         created_at: r.created_at,
         updated_at: r.updated_at
@@ -268,6 +270,8 @@ exports.getAlbumById = async (req, res) => {
       recordLabelName: r.labelName || '—',
       recordLabelImage: formatImage(r.labelImage, host),
       songCount: r.songCount || 0,
+      release_year: r.release_year || '',
+      releaseYear: r.release_year || '',
       songs: formattedSongs,
       song_ids: formattedSongs.map(s => s.id),
       created_at: r.created_at,
@@ -473,7 +477,8 @@ exports.getAlbumArtists = async (req, res) => {
 exports.createAlbum = async (req, res) => {
   try {
     const pool = getPool();
-    const { name, image_url, record_label_id, song_ids } = req.body;
+    const { name, image_url, record_label_id, song_ids, release_year, releaseYear } = req.body;
+    const relYear = release_year || releaseYear || null;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ message: 'Album name is required' });
@@ -503,9 +508,9 @@ exports.createAlbum = async (req, res) => {
     const labelId = record_label_id ? parseInt(record_label_id, 10) : null;
 
     const [result] = await pool.query(
-      `INSERT INTO album (name, display_name, image_url, record_label_id, is_delete)
-       VALUES (?, ?, ?, ?, 0)`,
-      [convertedName, displayName, image_url, labelId]
+      `INSERT INTO album (name, display_name, image_url, record_label_id, release_year, is_delete)
+       VALUES (?, ?, ?, ?, ?, 0)`,
+      [convertedName, displayName, image_url, labelId, relYear]
     );
 
     const albumId = result.insertId;
@@ -536,7 +541,8 @@ exports.updateAlbum = async (req, res) => {
   try {
     const pool = getPool();
     const id = parseInt(req.params.id, 10);
-    const { name, image_url, record_label_id, song_ids } = req.body;
+    const { name, image_url, record_label_id, song_ids, release_year, releaseYear } = req.body;
+    const relYear = release_year || releaseYear || null;
 
     if (isNaN(id)) {
       return res.status(400).json({ message: 'Invalid album ID' });
@@ -567,9 +573,9 @@ exports.updateAlbum = async (req, res) => {
 
     await pool.query(
       `UPDATE album 
-       SET name = ?, display_name = ?, image_url = ?, record_label_id = ?
+       SET name = ?, display_name = ?, image_url = ?, record_label_id = ?, release_year = ?
        WHERE id = ? AND is_delete = 0`,
-      [convertedName, displayName, image_url || null, labelId, id]
+      [convertedName, displayName, image_url || null, labelId, relYear, id]
     );
 
     // Sync songalbum relationships if song_ids array is provided

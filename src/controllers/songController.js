@@ -1612,6 +1612,7 @@ exports.getSongAlbumsAndLabels = async (req, res) => {
         a.display_name as album_display_name,
         a.image_url as album_image,
         a.record_label_id,
+        a.release_year,
         YEAR(a.created_at) as album_year,
         rl.id as label_id,
         COALESCE(rl.display_name, rl.name) as label_name,
@@ -1644,6 +1645,7 @@ exports.getSongAlbumsAndLabels = async (req, res) => {
       if (!albumsMap[r.album_id]) {
         const albumImg = formatImage(r.album_image, host);
         const labelImg = formatImage(r.label_image, host);
+        const yearVal = r.release_year || (r.album_year ? String(r.album_year) : '');
         albumsMap[r.album_id] = {
           id: r.album_id,
           name: toTitleCase(r.album_name),
@@ -1657,7 +1659,9 @@ exports.getSongAlbumsAndLabels = async (req, res) => {
           track_count: r.track_count || 0,
           songsCount: r.track_count || 0,
           tracks: `${r.track_count || 0} Tracks`,
-          year: r.album_year ? String(r.album_year) : '2022'
+          release_year: yearVal,
+          releaseYear: yearVal,
+          year: yearVal || '2024'
         };
       }
 

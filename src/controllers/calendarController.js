@@ -1,32 +1,122 @@
 const { getPool } = require('../config/db');
 
-// GET /api/calendar/events (Get all active events with optional date / month filter)
+// Helper to reliably format date values into YYYY-MM-DD strings
+function formatYMD(d) {
+  if (!d) return null;
+  if (typeof d === 'string') {
+    if (/^\d{4}-\d{2}-\d{2}/.test(d)) {
+      return d.slice(0, 10);
+    }
+  }
+  if (d instanceof Date) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+  return String(d).slice(0, 10);
+}
+
+// GET /api/calendar/events (Get all events: Custom events, Case Situation stages, Notes)
 exports.getEvents = async (req, res) => {
   try {
     const pool = getPool();
-    const { date, month, year } = req.query;
 
-    let whereClauses = ['(is_delete = 0 OR is_delete IS NULL)'];
-    let queryParams = [];
-
-    if (date) {
-      whereClauses.push('event_date = ?');
-      queryParams.push(date);
-    } else if (month && year) {
-      whereClauses.push('MONTH(event_date) = ? AND YEAR(event_date) = ?');
-      queryParams.push(parseInt(month, 10), parseInt(year, 10));
-    }
-
-    const whereStr = 'WHERE ' + whereClauses.join(' AND ');
-    const [rows] = await pool.query(
-      `SELECT id, event_name, description, DATE_FORMAT(event_date, '%Y-%m-%d') as event_date, event_time, is_delete, created_at, updated_at
-       FROM calendar_event ${whereStr} ORDER BY event_date ASC, event_time ASC`,
-      queryParams
+    // 1. Fetch Custom Calendar Events
+    const [calRows] = await pool.query(
+      `SELECT id, event_name, description, event_date, event_time, 'event' as type
+       FROM calendar_event 
+       WHERE (is_delete = 0 OR is_delete IS NULL)
+       ORDER BY event_date ASC, event_time ASC`
     );
 
+    // 2. Fetch Active Notes (Only Notes, Cases are represented by their Situation Stages)
+    const [ncRows] = await pool.query(
+      `SELECT id, type, name as event_name, description, start_date, '09:00' as event_time, status
+       FROM notesandcases
+       WHERE is_delete = 0 AND type = 'note'`
+    );
+
+    // 3. Fetch Case Situation Stages
+    const [sitRows] = await pool.query(
+      `SELECT s.id, s.notesandcase_id, s.order_id, s.description, 
+              s.start_date, s.end_date,
+              '09:00' as event_time,
+              nc.name as case_name
+       FROM situation s
+       JOIN notesandcases nc ON s.notesandcase_id = nc.id
+       WHERE s.is_delete = 0 AND nc.is_delete = 0 AND nc.type = 'case'`
+    );
+
+    // Format Notes as calendar events
+    const ncEvents = ncRows.map(nc => {
+      const sDate = formatYMD(nc.start_date);
+      return {
+        id: `note_${nc.id}`,
+        original_id: nc.id,
+        event_name: `Note: ${nc.event_name}`,
+        description: nc.description,
+        event_date: sDate,
+        start_date: sDate,
+        end_date: sDate,
+        event_time: nc.event_time || '09:00',
+        type: 'note',
+        category: 'Note',
+        color: '#10b981',
+        bg_color: '#ecfdf5',
+        text_color: '#059669'
+      };
+    });
+
+    // Format Case Situation Stages using situation's start_date and end_date
+    const sitEvents = sitRows.map(s => {
+      const stageLabel = s.order_id === 1 ? 'start' : String(s.order_id).padStart(2, '0');
+      const descSnippet = s.description ? `: ${s.description}` : '';
+      const stageName = `${s.case_name} - Stage ${stageLabel}${descSnippet}`;
+      const sDate = formatYMD(s.start_date);
+      const eDate = formatYMD(s.end_date) || sDate;
+
+      return {
+        id: `sit_${s.id}`,
+        original_id: s.id,
+        notesandcase_id: s.notesandcase_id,
+        event_name: stageName,
+        case_name: s.case_name,
+        description: s.description,
+        event_date: sDate,
+        start_date: sDate,
+        end_date: eDate,
+        event_time: '09:00',
+        type: 'situation',
+        category: 'Situation Stage',
+        color: '#8b5cf6',
+        bg_color: '#f5f3ff',
+        text_color: '#7c3aed'
+      };
+    });
+
+    const formattedCalEvents = calRows.map(e => {
+      const eDate = formatYMD(e.event_date);
+      return {
+        ...e,
+        id: e.id,
+        original_id: e.id,
+        event_date: eDate,
+        start_date: eDate,
+        end_date: eDate,
+        type: 'event',
+        category: 'Calendar Event',
+        color: '#0b66e3',
+        bg_color: '#eff6ff',
+        text_color: '#0b66e3'
+      };
+    });
+
+    const allEvents = [...formattedCalEvents, ...ncEvents, ...sitEvents];
+
     res.json({
-      events: rows,
-      totalCount: rows.length
+      events: allEvents,
+      totalCount: allEvents.length
     });
   } catch (error) {
     console.error('Error fetching calendar events:', error);
@@ -75,7 +165,8 @@ exports.createEvent = async (req, res) => {
 exports.updateEvent = async (req, res) => {
   try {
     const pool = getPool();
-    const id = parseInt(req.params.id, 10);
+    const rawId = String(req.params.id).replace(/^(evt_|note_|sit_)/, '');
+    const id = parseInt(rawId, 10);
     if (isNaN(id)) {
       return res.status(400).json({ message: 'Invalid ID' });
     }
@@ -121,7 +212,8 @@ exports.updateEvent = async (req, res) => {
 exports.deleteEvent = async (req, res) => {
   try {
     const pool = getPool();
-    const id = parseInt(req.params.id, 10);
+    const rawId = String(req.params.id).replace(/^(evt_|note_|sit_)/, '');
+    const id = parseInt(rawId, 10);
     if (isNaN(id)) {
       return res.status(400).json({ message: 'Invalid ID' });
     }

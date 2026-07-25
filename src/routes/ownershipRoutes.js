@@ -19,6 +19,7 @@ router.route('')
 // Individual resource routes
 router.get('/:id', ownershipController.getOwnershipById);
 router.post('/:id/songs', ownershipController.addSongsToOwnership);
+router.delete('/:id/songs/:songId', ownershipController.removeSongFromOwnership);
 router.put('/:id', upload.any(), ownershipController.updateOwnership);
 router.delete('/:id', ownershipController.deleteOwnership);
 

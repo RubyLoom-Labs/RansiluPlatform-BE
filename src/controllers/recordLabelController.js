@@ -270,7 +270,7 @@ exports.getRecordLabelSongs = async (req, res) => {
               (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songmusician sm JOIN artists art ON sm.artist_id = art.id WHERE sm.song_id = s.id) as musician,
               s.isrcCode,
               s.versionType,
-              s.ownership
+              s.is_singer, s.is_lyrics, s.is_musician, s.is_recordlabel
        FROM songalbum sa
        JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
        JOIN songs s ON sa.song_id = s.id
@@ -299,6 +299,12 @@ exports.getRecordLabelSongs = async (req, res) => {
         const parsedLabels = songLabelsMap[s.id] || [];
         const cCount = songConflictsMap[s.id] || 0;
         const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : 'No';
+        const isRec = (s.is_recordlabel === 1 || s.is_recordlabel === true || s.is_recordlabel === '1') ? 25 : 0;
+        const isLyr = (s.is_lyrics === 1 || s.is_lyrics === true || s.is_lyrics === '1') ? 25 : 0;
+        const isMus = (s.is_musician === 1 || s.is_musician === true || s.is_musician === '1') ? 25 : 0;
+        const isSing = (s.is_singer === 1 || s.is_singer === true || s.is_singer === '1') ? 25 : 0;
+        const pct = isRec + isLyr + isMus + isSing;
+
         return {
           id: s.id,
           name: toTitleCase(s.name),
@@ -312,7 +318,9 @@ exports.getRecordLabelSongs = async (req, res) => {
           releaseDate: s.release_date ? String(s.release_date).split('T')[0] : '—',
           isrcCode: s.isrcCode || '—',
           versionType: s.versionType || 'Original',
-          ownership: s.ownership || 100,
+          ownership: pct,
+          ownershipPercentage: pct,
+          ownershipPercentageText: `${pct}%`,
           conflictCount: cCount,
           conflicts: conflictText,
           conflict: conflictText,

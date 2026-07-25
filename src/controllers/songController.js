@@ -286,6 +286,12 @@ exports.getSongs = async (req, res) => {
       const cCount = songConflictsMap[song.id] || 0;
       const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : (song.conflict || 'No');
 
+      const isRec = (song.is_recordlabel === 1 || song.is_recordlabel === true || song.is_recordlabel === '1') ? 25 : 0;
+      const isLyr = (song.is_lyrics === 1 || song.is_lyrics === true || song.is_lyrics === '1') ? 25 : 0;
+      const isMus = (song.is_musician === 1 || song.is_musician === true || song.is_musician === '1') ? 25 : 0;
+      const isSing = (song.is_singer === 1 || song.is_singer === true || song.is_singer === '1') ? 25 : 0;
+      const calculatedPct = isRec + isLyr + isMus + isSing;
+
       return {
         id: song.id,
         name: toTitleCase(song.name), // Format song name to Title Case on fetch
@@ -298,7 +304,9 @@ exports.getSongs = async (req, res) => {
         labels: labelList,
         recordLabels: labelList,
         labelNames: labelsText,
-        ownership: song.ownership || 100,
+        ownership: calculatedPct,
+        ownershipPercentage: calculatedPct,
+        ownershipPercentageText: `${calculatedPct}%`,
         notes: song.notes || 'No Cases Or Notes',
         conflictCount: cCount,
         conflicts: conflictText,
@@ -1476,8 +1484,11 @@ exports.getSongOwnership = async (req, res) => {
               o.document_name, o.document_url, o.is_ownership,
               o.is_singer as doc_is_singer, o.is_lyrics as doc_is_lyrics, o.is_musician as doc_is_musician, o.is_recordlabel as doc_is_recordlabel
        FROM ownershipsong os
-       JOIN ownership o ON os.ownership_id = o.id AND o.status = 1 AND o.is_delete = 0
-       WHERE os.song_id = ? AND os.status = 1 AND os.is_delete = 0
+       JOIN ownership o ON os.ownership_id = o.id 
+         AND (o.status = 1 OR o.status IS NULL) 
+         AND (o.is_delete = 0 OR o.is_delete IS NULL) 
+         AND o.is_ownership = 1
+       WHERE os.song_id = ? AND (os.status = 1 OR os.status IS NULL) AND (os.is_delete = 0 OR os.is_delete IS NULL)
        ORDER BY os.id ASC`,
       [songId]
     );
@@ -1568,24 +1579,72 @@ exports.deleteSongOwnership = async (req, res) => {
     const pool = getPool();
     const songId = parseInt(req.params.id, 10);
     const mappingId = parseInt(req.params.mappingId, 10);
+    const category = (req.query.category || req.body.category || '').toLowerCase().trim();
 
     if (isNaN(songId) || isNaN(mappingId)) {
       return res.status(400).json({ message: 'Invalid song or mapping ID' });
     }
 
-    // Soft delete mapping: set status = 0, is_delete = 1
-    await pool.query(
-      `UPDATE ownershipsong SET status = 0, is_delete = 1 WHERE id = ? AND song_id = ?`,
+    // 1. Fetch existing ownershipsong mapping record
+    const [rows] = await pool.query(
+      `SELECT is_singer, is_lyrics, is_musician, is_recordlabel 
+       FROM ownershipsong 
+       WHERE id = ? AND song_id = ? AND (is_delete = 0 OR is_delete IS NULL)`,
       [mappingId, songId]
     );
 
-    // Synchronize songs table boolean flags
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Ownership document mapping not found' });
+    }
+
+    const current = rows[0];
+    let isSinger = current.is_singer === 1 ? 1 : 0;
+    let isLyrics = current.is_lyrics === 1 ? 1 : 0;
+    let isMusician = current.is_musician === 1 ? 1 : 0;
+    let isRecordLabel = current.is_recordlabel === 1 ? 1 : 0;
+
+    // 2. Set the specific sub-category column to 0 based on section deleted
+    if (category === 'recordlabel' || category === 'record_label' || category === 'label') {
+      isRecordLabel = 0;
+    } else if (category === 'lyrics') {
+      isLyrics = 0;
+    } else if (category === 'musician' || category === 'melody') {
+      isMusician = 0;
+    } else if (category === 'singer') {
+      isSinger = 0;
+    } else {
+      // If no specific category passed, zero out all
+      isSinger = 0;
+      isLyrics = 0;
+      isMusician = 0;
+      isRecordLabel = 0;
+    }
+
+    // 3. If ALL 4 attributes are 0, soft delete mapping (status = 0, is_delete = 1)
+    //    Otherwise, update the row keeping status = 1, is_delete = 0 and updated column = 0
+    if (isSinger === 0 && isLyrics === 0 && isMusician === 0 && isRecordLabel === 0) {
+      await pool.query(
+        `UPDATE ownershipsong 
+         SET is_singer = 0, is_lyrics = 0, is_musician = 0, is_recordlabel = 0, status = 0, is_delete = 1 
+         WHERE id = ? AND song_id = ?`,
+        [mappingId, songId]
+      );
+    } else {
+      await pool.query(
+        `UPDATE ownershipsong 
+         SET is_singer = ?, is_lyrics = ?, is_musician = ?, is_recordlabel = ?, status = 1, is_delete = 0 
+         WHERE id = ? AND song_id = ?`,
+        [isSinger, isLyrics, isMusician, isRecordLabel, mappingId, songId]
+      );
+    }
+
+    // 4. Synchronize songs table boolean flags
     const { syncSongOwnership } = require('./ownershipController');
     if (syncSongOwnership) {
       await syncSongOwnership(pool, [songId]);
     }
 
-    res.json({ success: true, message: 'Ownership document mapping removed successfully' });
+    res.json({ success: true, message: 'Ownership document section removed successfully' });
   } catch (error) {
     console.error('Error deleting song ownership mapping:', error);
     res.status(500).json({ message: 'Failed to remove ownership document mapping' });

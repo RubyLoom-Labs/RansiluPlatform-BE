@@ -274,7 +274,7 @@ exports.getDistributorSongs = async (req, res) => {
              '—' as album,
              s.isrcCode,
              s.versionType,
-             s.ownership,
+             s.is_singer, s.is_lyrics, s.is_musician, s.is_recordlabel,
              sd.status as mapping_status
       FROM songdistributor sd
       JOIN songs s ON sd.song_id = s.id
@@ -299,6 +299,12 @@ exports.getDistributorSongs = async (req, res) => {
         const parsedLabels = songLabelsMap[s.id] || [];
         const cCount = songConflictsMap[s.id] || 0;
         const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : 'No';
+        const isRec = (s.is_recordlabel === 1 || s.is_recordlabel === true || s.is_recordlabel === '1') ? 25 : 0;
+        const isLyr = (s.is_lyrics === 1 || s.is_lyrics === true || s.is_lyrics === '1') ? 25 : 0;
+        const isMus = (s.is_musician === 1 || s.is_musician === true || s.is_musician === '1') ? 25 : 0;
+        const isSing = (s.is_singer === 1 || s.is_singer === true || s.is_singer === '1') ? 25 : 0;
+        const pct = isRec + isLyr + isMus + isSing;
+
         return {
           id: s.id,
           name: toTitleCase(s.name),
@@ -312,7 +318,9 @@ exports.getDistributorSongs = async (req, res) => {
           releaseDate: s.release_date ? (typeof s.release_date === 'object' ? s.release_date.toISOString().split('T')[0] : String(s.release_date).split('T')[0]) : '—',
           isrcCode: s.isrcCode || '—',
           versionType: s.versionType || 'Original',
-          ownership: s.ownership || 100,
+          ownership: pct,
+          ownershipPercentage: pct,
+          ownershipPercentageText: `${pct}%`,
           conflictCount: cCount,
           conflicts: conflictText,
           conflict: conflictText,

@@ -331,7 +331,7 @@ exports.getAlbumSongs = async (req, res) => {
 
     // Fetch related songs
     let dataQuery = `
-      SELECT s.id, s.name, s.imageUrl, s.isrcCode, s.versionType,
+      SELECT s.id, s.name, s.imageUrl, s.isrcCode, s.versionType, s.is_singer, s.is_lyrics, s.is_musician, s.is_recordlabel,
              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songSinger ss JOIN artists art ON ss.artist_id = art.id WHERE ss.song_id = s.id) as artist,
              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songLyrics sl JOIN artists art ON sl.artist_id = art.id WHERE sl.song_id = s.id) as lyricist,
              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songmusician sm JOIN artists art ON sm.artist_id = art.id WHERE sm.song_id = s.id) as musician
@@ -361,6 +361,12 @@ exports.getAlbumSongs = async (req, res) => {
       const songLabelList = parsedLabels.length > 0 ? parsedLabels : albumLabelObj;
       const cCount = songConflictsMap[s.id] || 0;
       const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : 'No';
+      const isRec = (s.is_recordlabel === 1 || s.is_recordlabel === true || s.is_recordlabel === '1') ? 25 : 0;
+      const isLyr = (s.is_lyrics === 1 || s.is_lyrics === true || s.is_lyrics === '1') ? 25 : 0;
+      const isMus = (s.is_musician === 1 || s.is_musician === true || s.is_musician === '1') ? 25 : 0;
+      const isSing = (s.is_singer === 1 || s.is_singer === true || s.is_singer === '1') ? 25 : 0;
+      const pct = isRec + isLyr + isMus + isSing;
+
       return {
         id: s.id,
         name: toTitleCase(s.name),
@@ -371,6 +377,9 @@ exports.getAlbumSongs = async (req, res) => {
         duration: '03:45',
         isrcCode: s.isrcCode || '—',
         versionType: s.versionType || 'Original',
+        ownership: pct,
+        ownershipPercentage: pct,
+        ownershipPercentageText: `${pct}%`,
         conflictCount: cCount,
         conflicts: conflictText,
         conflict: conflictText,

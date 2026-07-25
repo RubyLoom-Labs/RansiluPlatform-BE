@@ -59,12 +59,16 @@ async function syncSongOwnership(pool, songIds) {
   for (const songId of songIdList) {
     const [rows] = await pool.query(
       `SELECT 
-         MAX(is_singer) as is_singer,
-         MAX(is_lyrics) as is_lyrics,
-         MAX(is_musician) as is_musician,
-         MAX(is_recordlabel) as is_recordlabel
-       FROM ownershipsong
-       WHERE song_id = ? AND status = 1 AND is_delete = 0`,
+         MAX(os.is_singer) as is_singer,
+         MAX(os.is_lyrics) as is_lyrics,
+         MAX(os.is_musician) as is_musician,
+         MAX(os.is_recordlabel) as is_recordlabel
+       FROM ownershipsong os
+       JOIN ownership o ON os.ownership_id = o.id 
+         AND (o.is_delete = 0 OR o.is_delete IS NULL) 
+         AND (o.status = 1 OR o.status IS NULL) 
+         AND o.is_ownership = 1
+       WHERE os.song_id = ? AND (os.status = 1 OR os.status IS NULL) AND (os.is_delete = 0 OR os.is_delete IS NULL)`,
       [songId]
     );
 
@@ -571,7 +575,7 @@ exports.getOwnershipById = async (req, res) => {
         if (isMusician) typesList.push('Musician');
         if (isRecordLabel) typesList.push('Record Label');
 
-        const pct = (isRecordLabel ? 50 : 0) + (isLyrics ? 25 : 0) + (isMusician ? 25 : 0);
+        const pct = (isRecordLabel ? 25 : 0) + (isLyrics ? 25 : 0) + (isMusician ? 25 : 0) + (isSinger ? 25 : 0);
         const statusStr = (s.status === 1 || s.status === '1' || s.status === 'Active' || s.status === 'active') ? 'Active' : 'Inactive';
         const conflictStr = cCount > 0 ? `${cCount} Conflict${cCount > 1 ? 's' : ''}` : (s.conflict && s.conflict !== '0' && s.conflict !== 'No' ? s.conflict : 'No');
 
@@ -597,6 +601,7 @@ exports.getOwnershipById = async (req, res) => {
           is_recordlabel: isRecordLabel ? 1 : 0,
           ownershipTypes: typesList,
           ownershipType: typesList.join(', ') || '—',
+          ownership: pct,
           ownershipPercentage: pct,
           ownershipPercentageText: `${pct}%`,
           notes: s.notes || 'No Cases Or Notes',
@@ -889,6 +894,32 @@ exports.deleteOwnership = async (req, res) => {
     res.json({ success: true, message: 'Ownership document deleted successfully', id });
   } catch (error) {
     console.error('Error deleting ownership document:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// DELETE /ownership/:id/songs/:songId
+exports.removeSongFromOwnership = async (req, res) => {
+  try {
+    const pool = getPool();
+    const id = parseInt(req.params.id, 10);
+    const songId = parseInt(req.params.songId, 10);
+
+    if (isNaN(id) || isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid ownership ID or song ID' });
+    }
+
+    await pool.query(
+      `UPDATE ownershipsong SET status = 0, is_delete = 1 WHERE ownership_id = ? AND song_id = ?`,
+      [id, songId]
+    );
+
+    // Synchronize songs table boolean flags for this song
+    await syncSongOwnership(pool, [songId]);
+
+    res.json({ success: true, message: 'Song removed from ownership document successfully' });
+  } catch (error) {
+    console.error('Error removing song from ownership document:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 };

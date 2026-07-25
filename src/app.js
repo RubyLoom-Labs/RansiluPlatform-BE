@@ -11,6 +11,7 @@ const eAccountRoutes = require('./routes/eAccountRoutes');
 const calendarRoutes = require('./routes/calendarRoutes');
 const revenueRoutes = require('./routes/revenueRoutes');
 const ownershipRoutes = require('./routes/ownershipRoutes');
+const notesCasesRoutes = require('./routes/notesCasesRoutes');
 
 const app = express();
 
@@ -37,6 +38,8 @@ app.use('/api/calendar/events', calendarRoutes);
 app.use('/api/revenue', revenueRoutes);
 app.use('/api/ownership', ownershipRoutes);
 app.use('/api/ownerships', ownershipRoutes);
+app.use('/api/notes-and-cases', notesCasesRoutes);
+app.use('/api/notes-cases', notesCasesRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

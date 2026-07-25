@@ -442,7 +442,7 @@ exports.getRingtoneSongs = async (req, res) => {
              dist.company_name as distributor,
              s.isrcCode,
              s.versionType,
-             s.ownership
+             s.is_singer, s.is_lyrics, s.is_musician, s.is_recordlabel
       FROM songringintone sr
       JOIN songs s ON sr.song_id = s.id
       LEFT JOIN songdistributor sd ON s.id = sd.song_id AND (sd.status = 1 OR sd.status IS NULL) AND (sd.is_deleted = 0 OR sd.is_deleted IS NULL)
@@ -471,11 +471,10 @@ exports.getRingtoneSongs = async (req, res) => {
         const parsedLabels = songLabelsMap[s.id] || [];
         const cCount = songConflictsMap[s.id] || 0;
         const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : 'No';
-        const isRec = (s.is_recordlabel === 1 || s.is_recordlabel === true || s.is_recordlabel === '1') ? 25 : 0;
+        const isRec = (s.is_recordlabel === 1 || s.is_recordlabel === true || s.is_recordlabel === '1') ? 50 : 0;
         const isLyr = (s.is_lyrics === 1 || s.is_lyrics === true || s.is_lyrics === '1') ? 25 : 0;
         const isMus = (s.is_musician === 1 || s.is_musician === true || s.is_musician === '1') ? 25 : 0;
-        const isSing = (s.is_singer === 1 || s.is_singer === true || s.is_singer === '1') ? 25 : 0;
-        const pct = isRec + isLyr + isMus + isSing;
+        const pct = isRec + isLyr + isMus;
         
         return {
           id: s.id,

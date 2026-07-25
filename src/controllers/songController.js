@@ -121,9 +121,15 @@ exports.getSongs = async (req, res) => {
       queryParams.push(versionType);
     }
 
-    if (statusFilter) {
+    if (statusFilter !== undefined && statusFilter !== null && statusFilter !== '') {
       whereClauses.push('songs.status = ?');
-      queryParams.push(statusFilter === 'Active' ? 1 : 0);
+      if (statusFilter === 'Active' || String(statusFilter) === '1') {
+        queryParams.push(1);
+      } else if (statusFilter === 'Inactive' || String(statusFilter) === '0') {
+        queryParams.push(0);
+      } else {
+        queryParams.push(statusFilter);
+      }
     }
 
     if (conflictFilter) {
@@ -286,11 +292,10 @@ exports.getSongs = async (req, res) => {
       const cCount = songConflictsMap[song.id] || 0;
       const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : (song.conflict || 'No');
 
-      const isRec = (song.is_recordlabel === 1 || song.is_recordlabel === true || song.is_recordlabel === '1') ? 25 : 0;
+      const isRec = (song.is_recordlabel === 1 || song.is_recordlabel === true || song.is_recordlabel === '1') ? 50 : 0;
       const isLyr = (song.is_lyrics === 1 || song.is_lyrics === true || song.is_lyrics === '1') ? 25 : 0;
       const isMus = (song.is_musician === 1 || song.is_musician === true || song.is_musician === '1') ? 25 : 0;
-      const isSing = (song.is_singer === 1 || song.is_singer === true || song.is_singer === '1') ? 25 : 0;
-      const calculatedPct = isRec + isLyr + isMus + isSing;
+      const calculatedPct = isRec + isLyr + isMus;
 
       return {
         id: song.id,
@@ -1466,8 +1471,8 @@ exports.getSongOwnership = async (req, res) => {
     const isMusician = song.is_musician === 1;
     const isSinger = song.is_singer === 1;
 
-    // Summary Percentage: Each of 4 categories contributes 25% to summary total
-    const pct = (isRecordLabel ? 25 : 0) + (isLyrics ? 25 : 0) + (isMusician ? 25 : 0) + (isSinger ? 25 : 0);
+    // Summary Percentage: Record Label (50%), Lyrics (25%), Musician (25%)
+    const pct = (isRecordLabel ? 50 : 0) + (isLyrics ? 25 : 0) + (isMusician ? 25 : 0);
 
     const summary = {
       percentage: pct,

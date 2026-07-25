@@ -39,10 +39,11 @@ exports.getArtists = async (req, res) => {
     const offset = (page - 1) * limit;
     
     const search = req.query.search || '';
-    const role = req.query.role || '';
+    const role = req.query.role || req.query.type || '';
     const gender = req.query.gender || '';
     const sort = req.query.sort || '';
     const isExport = req.query.export === 'true';
+    const statusParam = req.query.status;
 
     // Build WHERE clause
     let whereClauses = ['(a.is_delete = 0 OR a.is_delete IS NULL)'];
@@ -54,15 +55,18 @@ exports.getArtists = async (req, res) => {
     }
 
     if (role) {
-      if (role.toLowerCase() === 'artist') {
+      const r = role.toLowerCase();
+      if (r === 'artist' || r === 'singer') {
         whereClauses.push('(a.singer = 1 OR a.band = 1)');
-      } else if (['music', 'lyrics', 'singer', 'band', 'other'].includes(role.toLowerCase())) {
-        whereClauses.push(`a.${role.toLowerCase()} = 1`);
+      } else if (['music', 'lyrics', 'band', 'other'].includes(r)) {
+        whereClauses.push(`a.${r} = 1`);
       }
     }
 
-    // Dropdown fields select active artists only
-    if (role) {
+    if (statusParam !== undefined && statusParam !== '') {
+      whereClauses.push('a.status = ?');
+      queryParams.push(parseInt(statusParam, 10));
+    } else if (role) {
       whereClauses.push('a.status = 1');
     }
 
@@ -629,11 +633,10 @@ exports.getArtistSongs = async (req, res) => {
       const parsedLabels = songLabelsMap[s.id] || [];
       const cCount = songConflictsMap[s.id] || 0;
       const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : 'No';
-      const isRec = (s.is_recordlabel === 1 || s.is_recordlabel === true || s.is_recordlabel === '1') ? 25 : 0;
+      const isRec = (s.is_recordlabel === 1 || s.is_recordlabel === true || s.is_recordlabel === '1') ? 50 : 0;
       const isLyr = (s.is_lyrics === 1 || s.is_lyrics === true || s.is_lyrics === '1') ? 25 : 0;
       const isMus = (s.is_musician === 1 || s.is_musician === true || s.is_musician === '1') ? 25 : 0;
-      const isSing = (s.is_singer === 1 || s.is_singer === true || s.is_singer === '1') ? 25 : 0;
-      const pct = isRec + isLyr + isMus + isSing;
+      const pct = isRec + isLyr + isMus;
 
       return {
         id: s.id,

@@ -361,11 +361,10 @@ exports.getAlbumSongs = async (req, res) => {
       const songLabelList = parsedLabels.length > 0 ? parsedLabels : albumLabelObj;
       const cCount = songConflictsMap[s.id] || 0;
       const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : 'No';
-      const isRec = (s.is_recordlabel === 1 || s.is_recordlabel === true || s.is_recordlabel === '1') ? 25 : 0;
+      const isRec = (s.is_recordlabel === 1 || s.is_recordlabel === true || s.is_recordlabel === '1') ? 50 : 0;
       const isLyr = (s.is_lyrics === 1 || s.is_lyrics === true || s.is_lyrics === '1') ? 25 : 0;
       const isMus = (s.is_musician === 1 || s.is_musician === true || s.is_musician === '1') ? 25 : 0;
-      const isSing = (s.is_singer === 1 || s.is_singer === true || s.is_singer === '1') ? 25 : 0;
-      const pct = isRec + isLyr + isMus + isSing;
+      const pct = isRec + isLyr + isMus;
 
       return {
         id: s.id,

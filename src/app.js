@@ -12,6 +12,7 @@ const calendarRoutes = require('./routes/calendarRoutes');
 const revenueRoutes = require('./routes/revenueRoutes');
 const ownershipRoutes = require('./routes/ownershipRoutes');
 const notesCasesRoutes = require('./routes/notesCasesRoutes');
+const settingsRoutes = require('./routes/settings');
 
 const app = express();
 
@@ -40,6 +41,7 @@ app.use('/api/ownership', ownershipRoutes);
 app.use('/api/ownerships', ownershipRoutes);
 app.use('/api/notes-and-cases', notesCasesRoutes);
 app.use('/api/notes-cases', notesCasesRoutes);
+app.use('/api/settings', settingsRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

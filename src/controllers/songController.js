@@ -1409,6 +1409,189 @@ function formatImage(pathStr, host) {
   return cleanPath.startsWith('/') ? `${host}${cleanPath}` : `${host}/${cleanPath}`;
 }
 
+function formatDocumentUrl(pathStr, host) {
+  if (!pathStr || typeof pathStr !== 'string') {
+    return `${host}/uploads/documents/sample-document.pdf`;
+  }
+  const cleanPath = pathStr.replace(/\\/g, '/').trim();
+  if (cleanPath.startsWith('http://') || cleanPath.startsWith('https://')) {
+    return cleanPath;
+  }
+  if (cleanPath.startsWith('/uploads/')) {
+    return `${host}${cleanPath}`;
+  }
+  if (cleanPath.startsWith('uploads/')) {
+    return `${host}/${cleanPath}`;
+  }
+  return `${host}/uploads/documents/sample-document.pdf`;
+}
+
+// ─────────────────────────────────────────────────────────
+// GET /songs/:id/ownership
+// Fetches song ownership summary & grouped ownership documents
+// ─────────────────────────────────────────────────────────
+exports.getSongOwnership = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    const host = `${req.protocol}://${req.get('host')}`;
+
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+
+    // 1. Fetch song record boolean flags
+    const [songRows] = await pool.query(
+      `SELECT id, name, is_singer, is_lyrics, is_musician, is_recordlabel 
+       FROM songs 
+       WHERE id = ? AND (is_delete = 0 OR is_delete IS NULL)`,
+      [songId]
+    );
+
+    if (songRows.length === 0) {
+      return res.status(404).json({ message: 'Song not found' });
+    }
+
+    const song = songRows[0];
+    const isRecordLabel = song.is_recordlabel === 1;
+    const isLyrics = song.is_lyrics === 1;
+    const isMusician = song.is_musician === 1;
+    const isSinger = song.is_singer === 1;
+
+    // Summary Percentage: Each of 4 categories contributes 25% to summary total
+    const pct = (isRecordLabel ? 25 : 0) + (isLyrics ? 25 : 0) + (isMusician ? 25 : 0) + (isSinger ? 25 : 0);
+
+    const summary = {
+      percentage: pct,
+      is_recordlabel: isRecordLabel,
+      is_lyrics: isLyrics,
+      is_musician: isMusician,
+      is_singer: isSinger
+    };
+
+    // 2. Fetch linked ownershipsong mappings & ownership documents
+    const [mappingRows] = await pool.query(
+      `SELECT os.id as mapping_id, os.song_id, os.ownership_id,
+              os.is_singer, os.is_lyrics, os.is_musician, os.is_recordlabel,
+              o.document_name, o.document_url, o.is_ownership,
+              o.is_singer as doc_is_singer, o.is_lyrics as doc_is_lyrics, o.is_musician as doc_is_musician, o.is_recordlabel as doc_is_recordlabel
+       FROM ownershipsong os
+       JOIN ownership o ON os.ownership_id = o.id AND o.status = 1 AND o.is_delete = 0
+       WHERE os.song_id = ? AND os.status = 1 AND os.is_delete = 0
+       ORDER BY os.id ASC`,
+      [songId]
+    );
+
+    // Fetch primary artist associated with each role for this song
+    const [singers] = await pool.query(
+      `SELECT a.name, a.image FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id = ? AND (a.is_delete = 0 OR a.is_delete IS NULL) LIMIT 1`,
+      [songId]
+    );
+    const [lyricists] = await pool.query(
+      `SELECT a.name, a.image FROM songLyrics sl JOIN artists a ON sl.artist_id = a.id WHERE sl.song_id = ? AND (a.is_delete = 0 OR a.is_delete IS NULL) LIMIT 1`,
+      [songId]
+    );
+    const [musicians] = await pool.query(
+      `SELECT a.name, a.image FROM songmusician sm JOIN artists a ON sm.artist_id = a.id WHERE sm.song_id = ? AND (a.is_delete = 0 OR a.is_delete IS NULL) LIMIT 1`,
+      [songId]
+    );
+    const songLabelsMap = await fetchSongLabelsMap([songId], pool, host);
+    const songLabelsList = songLabelsMap[songId] || [];
+
+    const singerArtist = singers[0] ? { name: toTitleCase(singers[0].name), image: formatImage(singers[0].image, host), role: 'Singer' } : { name: 'Singer Artist', image: null, role: 'Singer' };
+    const lyricistArtist = lyricists[0] ? { name: toTitleCase(lyricists[0].name), image: formatImage(lyricists[0].image, host), role: 'Lyrics' } : { name: 'Lyrics Artist', image: null, role: 'Lyrics' };
+    const musicianArtist = musicians[0] ? { name: toTitleCase(musicians[0].name), image: formatImage(musicians[0].image, host), role: 'Melody' } : { name: 'Melody Artist', image: null, role: 'Melody' };
+    const labelArtist = songLabelsList[0] ? { name: songLabelsList[0].name, image: songLabelsList[0].imageUrl || songLabelsList[0].image_url, role: 'Record Label' } : { name: 'Record Label', image: null, role: 'Record Label' };
+
+    const recordLabelsData = [];
+    const lyricsData = [];
+    const musiciansData = [];
+    const singersData = [];
+
+    mappingRows.forEach(row => {
+      const tagsList = [];
+      if (row.is_recordlabel === 1) tagsList.push('Record Label');
+      if (row.is_lyrics === 1) tagsList.push('Lyrics');
+      if (row.is_musician === 1) tagsList.push('Musician');
+      if (row.is_singer === 1) tagsList.push('Singer');
+      const tagStr = tagsList.length > 0 ? tagsList.join(', ') : 'Agreement';
+
+      const rawDocName = row.document_name || 'Document';
+      const docNameClean = rawDocName.replace(/\.pdf$/i, '');
+      const docFileName = `${docNameClean}.pdf`;
+      const docUrl = formatDocumentUrl(row.document_url, host);
+
+      const item = {
+        mappingId: row.mapping_id,
+        ownershipId: row.ownership_id,
+        name: docFileName,
+        rawName: docNameClean,
+        size: 'PDF Document',
+        badge: tagStr,
+        document_url: docUrl,
+        is_ownership: row.is_ownership === 1
+      };
+
+      if (row.is_recordlabel === 1) {
+        recordLabelsData.push({ ...item, artist: labelArtist });
+      }
+      if (row.is_lyrics === 1) {
+        lyricsData.push({ ...item, artist: lyricistArtist });
+      }
+      if (row.is_musician === 1) {
+        musiciansData.push({ ...item, artist: musicianArtist });
+      }
+      if (row.is_singer === 1) {
+        singersData.push({ ...item, artist: singerArtist });
+      }
+    });
+
+    res.json({
+      summary,
+      recordLabels: recordLabelsData,
+      lyrics: lyricsData,
+      musicians: musiciansData,
+      singers: singersData
+    });
+  } catch (error) {
+    console.error('Error fetching song ownership:', error);
+    res.status(500).json({ message: 'Failed to fetch song ownership' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────
+// DELETE /songs/:id/ownership/:mappingId
+// Soft deletes ownershipsong mapping record (status = 0, is_delete = 1)
+// ─────────────────────────────────────────────────────────
+exports.deleteSongOwnership = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    const mappingId = parseInt(req.params.mappingId, 10);
+
+    if (isNaN(songId) || isNaN(mappingId)) {
+      return res.status(400).json({ message: 'Invalid song or mapping ID' });
+    }
+
+    // Soft delete mapping: set status = 0, is_delete = 1
+    await pool.query(
+      `UPDATE ownershipsong SET status = 0, is_delete = 1 WHERE id = ? AND song_id = ?`,
+      [mappingId, songId]
+    );
+
+    // Synchronize songs table boolean flags
+    const { syncSongOwnership } = require('./ownershipController');
+    if (syncSongOwnership) {
+      await syncSongOwnership(pool, [songId]);
+    }
+
+    res.json({ success: true, message: 'Ownership document mapping removed successfully' });
+  } catch (error) {
+    console.error('Error deleting song ownership mapping:', error);
+    res.status(500).json({ message: 'Failed to remove ownership document mapping' });
+  }
+};
+
 // GET /songs/:id/albums (Song related albums & unique record labels)
 exports.getSongAlbumsAndLabels = async (req, res) => {
   try {

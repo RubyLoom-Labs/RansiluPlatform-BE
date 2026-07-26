@@ -28,7 +28,7 @@ exports.getRevenueData = async (req, res) => {
     if (type === 'songs') {
       // 1. Fetch active songs (status = 1 / Active, not deleted)
       const [songs] = await pool.query(`
-        SELECT s.id, s.name, s.name_sinhala as nameSinhala, s.status, s.ownership, s.notes, s.conflict, s.created_at
+        SELECT s.id, s.name, s.nameSinhala, s.status, s.ownership, s.notes, s.conflict, s.created_at
         FROM songs s
         WHERE (s.status = 1 OR s.status = 'Active' OR s.status IS NULL)
         ORDER BY s.id DESC

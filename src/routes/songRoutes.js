@@ -7,6 +7,12 @@ router.get('/', songController.getSongs);
 router.get('/:id', songController.getSongById);
 router.post('/check-name', songController.checkSongName);
 
+router.get('/:id/inactivate-check', songController.checkSongInactivationDependencies);
+router.get('/:id/delete-check', songController.checkSongDeleteDependencies);
+router.post('/:id/inactivate', songController.inactivateSong);
+router.post('/:id/activate', songController.activateSong);
+router.delete('/:id', songController.deleteSong);
+
 router.get('/:id/ownership', songController.getSongOwnership);
 router.delete('/:id/ownership/:mappingId', songController.deleteSongOwnership);
 router.get('/:id/albums', songController.getSongAlbumsAndLabels);

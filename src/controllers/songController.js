@@ -101,8 +101,8 @@ exports.getSongs = async (req, res) => {
     const sort = req.query.sort || 'Songs A-Z';
     const excludeId = req.query.excludeId ? parseInt(req.query.excludeId, 10) : null;
     
-    // Build WHERE clauses
-    let whereClauses = [];
+    // Build WHERE clauses - always exclude soft-deleted songs
+    let whereClauses = ['(songs.is_delete = 0 OR songs.is_delete IS NULL)'];
     let queryParams = [];
     
     if (search) {
@@ -599,7 +599,7 @@ exports.checkSongName = async (req, res) => {
       return res.status(400).json({ message: 'Song name is required' });
     }
 
-    let query = 'SELECT id FROM songs WHERE LOWER(name) = ?';
+    let query = 'SELECT id FROM songs WHERE LOWER(name) = ? AND (is_delete = 0 OR is_delete IS NULL)';
     let params = [name];
     if (excludeId) {
       query += ' AND id != ?';
@@ -628,7 +628,7 @@ exports.getSongById = async (req, res) => {
       return res.status(400).json({ message: 'Invalid song ID' });
     }
 
-    const [songs] = await pool.query('SELECT * FROM songs WHERE id = ?', [songId]);
+    const [songs] = await pool.query('SELECT * FROM songs WHERE id = ? AND (is_delete = 0 OR is_delete IS NULL)', [songId]);
     if (songs.length === 0) {
       return res.status(404).json({ message: 'Song not found' });
     }
@@ -1170,7 +1170,7 @@ exports.getSongVersions = async (req, res) => {
 
     // Fetch all songs that are versions of this original
     const [versionSongs] = await pool.query(
-      `SELECT * FROM songs WHERE originalSongId = ? AND versionType = 'Version' ORDER BY id ASC`,
+      `SELECT * FROM songs WHERE originalSongId = ? AND versionType = 'Version' AND (is_delete = 0 OR is_delete IS NULL) ORDER BY id ASC`,
       [songId]
     );
 
@@ -1845,6 +1845,389 @@ exports.removeSongAlbumRelationship = async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+// ─────────────────────────────────────────────────────────
+// GET /api/songs/:id/inactivate-check
+// Checks active records (status = 1 and is_delete/is_deleted = 0)
+// across all 8 song relationship tables.
+// ─────────────────────────────────────────────────────────
+exports.checkSongInactivationDependencies = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+
+    // 1. ownershipsong
+    const [ownershipRows] = await pool.query(`
+      SELECT os.id, COALESCE(o.document_name, CONCAT('Ownership #', os.ownership_id)) AS name
+      FROM ownershipsong os
+      LEFT JOIN ownership o ON os.ownership_id = o.id
+      WHERE os.song_id = ? AND (os.status = 1 OR os.status IS NULL) AND (os.is_delete = 0 OR os.is_delete IS NULL)
+    `, [songId]);
+
+    // 2. songalbum
+    const [albumRows] = await pool.query(`
+      SELECT sa.album_id AS id, COALESCE(a.name, a.display_name, CONCAT('Album #', sa.album_id)) AS name
+      FROM songalbum sa
+      JOIN album a ON sa.album_id = a.id
+      WHERE sa.song_id = ? AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+    `, [songId]);
+
+    // 3. songconflict / SongConflict
+    const [conflictRows] = await pool.query(`
+      SELECT sc.Id AS id, CONCAT(sc.CopyrightConflict, ' Conflict - ', sc.ConflictOwner) AS name
+      FROM SongConflict sc
+      WHERE sc.SongId = ? AND (sc.Status = 1 OR sc.Status IS NULL) AND (sc.IsDeleted = 0 OR sc.IsDeleted IS NULL OR sc.is_delete = 0)
+    `, [songId]);
+
+    // 4. songdistributor
+    const [distributorRows] = await pool.query(`
+      SELECT sd.distributor_id AS id, COALESCE(d.company_name, CONCAT('Distributor #', sd.distributor_id)) AS name
+      FROM songdistributor sd
+      JOIN distributors d ON sd.distributor_id = d.id
+      WHERE sd.song_id = ? AND (sd.status = 1 OR sd.status IS NULL) AND (sd.is_deleted = 0 OR sd.is_deleted IS NULL OR sd.is_delete = 0)
+    `, [songId]);
+
+    // 5. songlyrics
+    const [lyricsRows] = await pool.query(`
+      SELECT sl.artist_id AS id, a.name AS name
+      FROM songLyrics sl
+      JOIN artists a ON sl.artist_id = a.id
+      WHERE sl.song_id = ? AND (sl.status = 1 OR sl.status IS NULL) AND (sl.is_delete = 0 OR sl.is_delete IS NULL)
+    `, [songId]);
+
+    // 6. songmusician
+    const [musicianRows] = await pool.query(`
+      SELECT sm.artist_id AS id, a.name AS name
+      FROM songmusician sm
+      JOIN artists a ON sm.artist_id = a.id
+      WHERE sm.song_id = ? AND (sm.status = 1 OR sm.status IS NULL) AND (sm.is_delete = 0 OR sm.is_delete IS NULL)
+    `, [songId]);
+
+    // 7. songringintone
+    const [ringtoneRows] = await pool.query(`
+      SELECT sr.ringintone_id AS id, CONCAT(r.name, COALESCE(CONCAT(' (Code: ', sr.ringtone_code, ')'), '')) AS name
+      FROM songringintone sr
+      JOIN ringintone r ON sr.ringintone_id = r.id
+      WHERE sr.song_id = ? AND (sr.status = 1 OR sr.status IS NULL) AND (sr.is_deleted = 0 OR sr.is_deleted IS NULL OR sr.is_delete = 0)
+    `, [songId]);
+
+    // 8. songsinger / songSinger
+    const [singerRows] = await pool.query(`
+      SELECT ss.artist_id AS id, a.name AS name
+      FROM songSinger ss
+      JOIN artists a ON ss.artist_id = a.id
+      WHERE ss.song_id = ? AND (ss.status = 1 OR ss.status IS NULL) AND (ss.is_delete = 0 OR ss.is_delete IS NULL)
+    `, [songId]);
+
+    const dependencies = {
+      ownerships: ownershipRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+      albums: albumRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+      conflicts: conflictRows.map(r => ({ id: r.id, name: r.name })),
+      distributors: distributorRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+      lyrics: lyricsRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+      musicians: musicianRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+      ringtones: ringtoneRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+      singers: singerRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+    };
+
+    const hasActiveDependencies =
+      dependencies.ownerships.length > 0 ||
+      dependencies.albums.length > 0 ||
+      dependencies.conflicts.length > 0 ||
+      dependencies.distributors.length > 0 ||
+      dependencies.lyrics.length > 0 ||
+      dependencies.musicians.length > 0 ||
+      dependencies.ringtones.length > 0 ||
+      dependencies.singers.length > 0;
+
+    res.json({
+      hasActiveDependencies,
+      dependencies,
+    });
+  } catch (error) {
+    console.error('Error checking song inactivation dependencies:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────
+// GET /api/songs/:id/delete-check
+// Checks non-deleted records (is_delete/is_deleted = 0) across all 8 song relationship tables.
+// ─────────────────────────────────────────────────────────
+exports.checkSongDeleteDependencies = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+
+    // 1. ownershipsong
+    const [ownershipRows] = await pool.query(`
+      SELECT os.id, COALESCE(o.document_name, CONCAT('Ownership #', os.ownership_id)) AS name
+      FROM ownershipsong os
+      LEFT JOIN ownership o ON os.ownership_id = o.id
+      WHERE os.song_id = ? AND (os.is_delete = 0 OR os.is_delete IS NULL)
+    `, [songId]);
+
+    // 2. songalbum
+    const [albumRows] = await pool.query(`
+      SELECT sa.album_id AS id, COALESCE(a.name, a.display_name, CONCAT('Album #', sa.album_id)) AS name
+      FROM songalbum sa
+      JOIN album a ON sa.album_id = a.id
+      WHERE sa.song_id = ? AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+    `, [songId]);
+
+    // 3. songconflict / SongConflict
+    const [conflictRows] = await pool.query(`
+      SELECT sc.Id AS id, CONCAT(sc.CopyrightConflict, ' Conflict - ', sc.ConflictOwner) AS name
+      FROM SongConflict sc
+      WHERE sc.SongId = ? AND (sc.IsDeleted = 0 OR sc.IsDeleted IS NULL OR sc.is_delete = 0)
+    `, [songId]);
+
+    // 4. songdistributor
+    const [distributorRows] = await pool.query(`
+      SELECT sd.distributor_id AS id, COALESCE(d.company_name, CONCAT('Distributor #', sd.distributor_id)) AS name
+      FROM songdistributor sd
+      JOIN distributors d ON sd.distributor_id = d.id
+      WHERE sd.song_id = ? AND (sd.is_deleted = 0 OR sd.is_deleted IS NULL OR sd.is_delete = 0)
+    `, [songId]);
+
+    // 5. songlyrics
+    const [lyricsRows] = await pool.query(`
+      SELECT sl.artist_id AS id, a.name AS name
+      FROM songLyrics sl
+      JOIN artists a ON sl.artist_id = a.id
+      WHERE sl.song_id = ? AND (sl.is_delete = 0 OR sl.is_delete IS NULL)
+    `, [songId]);
+
+    // 6. songmusician
+    const [musicianRows] = await pool.query(`
+      SELECT sm.artist_id AS id, a.name AS name
+      FROM songmusician sm
+      JOIN artists a ON sm.artist_id = a.id
+      WHERE sm.song_id = ? AND (sm.is_delete = 0 OR sm.is_delete IS NULL)
+    `, [songId]);
+
+    // 7. songringintone
+    const [ringtoneRows] = await pool.query(`
+      SELECT sr.ringintone_id AS id, CONCAT(r.name, COALESCE(CONCAT(' (Code: ', sr.ringtone_code, ')'), '')) AS name
+      FROM songringintone sr
+      JOIN ringintone r ON sr.ringintone_id = r.id
+      WHERE sr.song_id = ? AND (sr.is_deleted = 0 OR sr.is_deleted IS NULL OR sr.is_delete = 0)
+    `, [songId]);
+
+    // 8. songsinger / songSinger
+    const [singerRows] = await pool.query(`
+      SELECT ss.artist_id AS id, a.name AS name
+      FROM songSinger ss
+      JOIN artists a ON ss.artist_id = a.id
+      WHERE ss.song_id = ? AND (ss.is_delete = 0 OR ss.is_delete IS NULL)
+    `, [songId]);
+
+    const dependencies = {
+      ownerships: ownershipRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+      albums: albumRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+      conflicts: conflictRows.map(r => ({ id: r.id, name: r.name })),
+      distributors: distributorRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+      lyrics: lyricsRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+      musicians: musicianRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+      ringtones: ringtoneRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+      singers: singerRows.map(r => ({ id: r.id, name: toTitleCase(r.name) })),
+    };
+
+    const hasActiveDependencies =
+      dependencies.ownerships.length > 0 ||
+      dependencies.albums.length > 0 ||
+      dependencies.conflicts.length > 0 ||
+      dependencies.distributors.length > 0 ||
+      dependencies.lyrics.length > 0 ||
+      dependencies.musicians.length > 0 ||
+      dependencies.ringtones.length > 0 ||
+      dependencies.singers.length > 0;
+
+    res.json({
+      hasActiveDependencies,
+      dependencies,
+    });
+  } catch (error) {
+    console.error('Error checking song delete dependencies:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────
+// POST /api/songs/:id/inactivate
+// Inactivates song (status = 0) AND soft-deletes all active
+// relationships across the 8 specified tables (status = 0, is_delete = 1).
+// ─────────────────────────────────────────────────────────
+exports.inactivateSong = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+
+    // 1. Update song status to 0 (Inactive), keeping is_delete = 0
+    await pool.query('UPDATE songs SET status = 0, is_delete = 0 WHERE id = ?', [songId]);
+
+    // 2. Update status = 0 across the 8 relationship tables (keeping is_delete = 0)
+    const safeUpdate = async (queryStr, params) => {
+      try {
+        await pool.query(queryStr, params);
+      } catch (err) {
+        console.warn(`Inactivation statement error [${queryStr}]:`, err.message);
+      }
+    };
+
+    await safeUpdate('UPDATE ownershipsong SET status = 0, is_delete = 0 WHERE song_id = ? AND (is_delete = 0 OR is_delete IS NULL)', [songId]);
+    await safeUpdate('UPDATE songalbum SET status = 0, is_delete = 0 WHERE song_id = ? AND (is_delete = 0 OR is_delete IS NULL)', [songId]);
+    await safeUpdate('UPDATE SongConflict SET Status = 0, IsDeleted = 0, is_delete = 0 WHERE SongId = ? AND (IsDeleted = 0 OR IsDeleted IS NULL OR is_delete = 0)', [songId]);
+    await safeUpdate('UPDATE songdistributor SET status = 0, is_deleted = 0, is_delete = 0 WHERE song_id = ? AND (is_deleted = 0 OR is_deleted IS NULL OR is_delete = 0)', [songId]);
+    await safeUpdate('UPDATE songLyrics SET status = 0, is_delete = 0 WHERE song_id = ? AND (is_delete = 0 OR is_delete IS NULL)', [songId]);
+    await safeUpdate('UPDATE songmusician SET status = 0, is_delete = 0 WHERE song_id = ? AND (is_delete = 0 OR is_delete IS NULL)', [songId]);
+    await safeUpdate('UPDATE songringintone SET status = 0, is_deleted = 0, is_delete = 0 WHERE song_id = ? AND (is_deleted = 0 OR is_deleted IS NULL OR is_delete = 0)', [songId]);
+    await safeUpdate('UPDATE songSinger SET status = 0, is_delete = 0 WHERE song_id = ? AND (is_delete = 0 OR is_delete IS NULL)', [songId]);
+
+    res.json({ success: true, message: 'Song and related active relationships inactivated successfully' });
+  } catch (error) {
+    console.error('Error inactivating song:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────
+// POST /api/songs/:id/activate
+// Activates song (status = 1, is_delete = 0) and reactivates linked records
+// ONLY IF their parent master entity (artist, album, ringtone, ownership) is active (status = 1 and is_delete = 0).
+// EXCEPT songdistributor which is excluded from reactivation.
+// ─────────────────────────────────────────────────────────
+exports.activateSong = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+
+    // 1. Set song status = 1, is_delete = 0
+    await pool.query('UPDATE songs SET status = 1, is_delete = 0 WHERE id = ?', [songId]);
+
+    const safeUpdate = async (queryStr, params) => {
+      try {
+        await pool.query(queryStr, params);
+      } catch (err) {
+        console.warn(`Reactivation query error [${queryStr}]:`, err.message);
+      }
+    };
+
+    // 2. Reactivate songSinger only if linked artist is active (status = 1, is_delete = 0)
+    await safeUpdate(`
+      UPDATE songSinger ss
+      JOIN artists a ON ss.artist_id = a.id
+      SET ss.status = 1, ss.is_delete = 0
+      WHERE ss.song_id = ? AND (a.status = 1 OR a.status = 'Active' OR a.status IS NULL) AND (a.is_delete = 0 OR a.is_delete IS NULL)
+    `, [songId]);
+
+    // 3. Reactivate songLyrics only if linked artist is active (status = 1, is_delete = 0)
+    await safeUpdate(`
+      UPDATE songLyrics sl
+      JOIN artists a ON sl.artist_id = a.id
+      SET sl.status = 1, sl.is_delete = 0
+      WHERE sl.song_id = ? AND (a.status = 1 OR a.status = 'Active' OR a.status IS NULL) AND (a.is_delete = 0 OR a.is_delete IS NULL)
+    `, [songId]);
+
+    // 4. Reactivate songmusician only if linked artist is active (status = 1, is_delete = 0)
+    await safeUpdate(`
+      UPDATE songmusician sm
+      JOIN artists a ON sm.artist_id = a.id
+      SET sm.status = 1, sm.is_delete = 0
+      WHERE sm.song_id = ? AND (a.status = 1 OR a.status = 'Active' OR a.status IS NULL) AND (a.is_delete = 0 OR a.is_delete IS NULL)
+    `, [songId]);
+
+    // 5. Reactivate songalbum only if linked album is active (is_delete = 0)
+    await safeUpdate(`
+      UPDATE songalbum sa
+      JOIN album a ON sa.album_id = a.id
+      SET sa.status = 1, sa.is_delete = 0
+      WHERE sa.song_id = ? AND (a.is_delete = 0 OR a.is_delete IS NULL)
+    `, [songId]);
+
+    // 6. Reactivate songringintone only if linked ringtone is active (status = 1, is_deleted = 0)
+    await safeUpdate(`
+      UPDATE songringintone sr
+      JOIN ringintone r ON sr.ringintone_id = r.id
+      SET sr.status = 1, sr.is_deleted = 0, sr.is_delete = 0
+      WHERE sr.song_id = ? AND (r.status = 1 OR r.status IS NULL) AND (r.is_deleted = 0 OR r.is_deleted IS NULL)
+    `, [songId]);
+
+    // 7. Reactivate ownershipsong only if linked ownership is active (status = 1, is_delete = 0)
+    await safeUpdate(`
+      UPDATE ownershipsong os
+      JOIN ownership o ON os.ownership_id = o.id
+      SET os.status = 1, os.is_delete = 0
+      WHERE os.song_id = ? AND (o.status = 1 OR o.status IS NULL) AND (o.is_delete = 0 OR o.is_delete IS NULL)
+    `, [songId]);
+
+    // 8. Reactivate SongConflict
+    await safeUpdate(`
+      UPDATE SongConflict SET Status = 1, IsDeleted = 0, is_delete = 0 WHERE SongId = ?
+    `, [songId]);
+
+    // NOTE: songdistributor is EXCLUDED from reactivation as requested.
+
+    res.json({ success: true, message: 'Song and associated active records reactivated successfully' });
+  } catch (error) {
+    console.error('Error activating song:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────
+// DELETE /api/songs/:id
+// Soft deletes a song (status = 0, is_delete = 1) and cascades
+// to soft delete all linked relationship records across the 8 tables.
+// ─────────────────────────────────────────────────────────
+exports.deleteSong = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+
+    // 1. Soft delete song
+    await pool.query('UPDATE songs SET status = 0, is_delete = 1 WHERE id = ?', [songId]);
+
+    const safeUpdate = async (queryStr, params) => {
+      try {
+        await pool.query(queryStr, params);
+      } catch (err) {
+        console.warn(`Soft delete error on statement [${queryStr}]:`, err.message);
+      }
+    };
+
+    // 2. Cascade soft delete all linked records
+    await safeUpdate('UPDATE ownershipsong SET status = 0, is_delete = 1 WHERE song_id = ?', [songId]);
+    await safeUpdate('UPDATE songalbum SET status = 0, is_delete = 1 WHERE song_id = ?', [songId]);
+    await safeUpdate('UPDATE SongConflict SET Status = 0, IsDeleted = 1, is_delete = 1 WHERE SongId = ?', [songId]);
+    await safeUpdate('UPDATE songdistributor SET status = 0, is_deleted = 1, is_delete = 1 WHERE song_id = ?', [songId]);
+    await safeUpdate('UPDATE songLyrics SET status = 0, is_delete = 1 WHERE song_id = ?', [songId]);
+    await safeUpdate('UPDATE songmusician SET status = 0, is_delete = 1 WHERE song_id = ?', [songId]);
+    await safeUpdate('UPDATE songringintone SET status = 0, is_deleted = 1, is_delete = 1 WHERE song_id = ?', [songId]);
+    await safeUpdate('UPDATE songSinger SET status = 0, is_delete = 1 WHERE song_id = ?', [songId]);
+
+    res.json({ success: true, message: 'Song deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting song:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
 
 
 

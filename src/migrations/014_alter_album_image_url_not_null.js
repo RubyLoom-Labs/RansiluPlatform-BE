@@ -12,3 +12,4 @@ async function up(pool) {
 }
 
 module.exports = { up };
+

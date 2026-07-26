@@ -98,12 +98,13 @@ exports.getRevenueData = async (req, res) => {
           ORDER BY s.id DESC
         `),
 
-        // 2. Revenue sums per song (Income, Earning, Outgoing)
+        // 2. Revenue sums per song (Income, Distributor 30%, Earning, Outgoing)
         pool.query(`
           SELECT r.song_id,
                  SUM(r.amount) AS total_income,
-                 SUM(COALESCE(r.remain_revenue, r.amount)) AS total_earning,
-                 SUM(r.amount - COALESCE(r.remain_revenue, r.amount)) AS total_outgoing
+                 SUM(COALESCE(r.distributor_amount, r.amount * 0.30)) AS total_distributor,
+                 SUM(COALESCE(r.remain_revenue, (r.amount * 0.70))) AS total_earning,
+                 SUM(r.amount - COALESCE(r.distributor_amount, r.amount * 0.30) - COALESCE(r.remain_revenue, (r.amount * 0.70))) AS total_outgoing
           FROM revenue r
           INNER JOIN songs s ON s.id = r.song_id AND s.status = 1 AND s.is_delete = 0
           WHERE 1=1 ${dateWhere}
@@ -195,6 +196,7 @@ exports.getRevenueData = async (req, res) => {
       revenueSumRows.forEach(r => {
         revenueSumMap[r.song_id] = {
           income: parseFloat(r.total_income) || 0,
+          distributor: parseFloat(r.total_distributor) || 0,
           earning: parseFloat(r.total_earning) || 0,
           outgoing: parseFloat(r.total_outgoing) || 0
         };
@@ -238,7 +240,7 @@ exports.getRevenueData = async (req, res) => {
         const rels      = songRelations[song.id]  || { singers: [], lyricists: [], musicians: [] };
         const labelList = songLabels[song.id]     || [];
         const cCount    = songConflictsMap[song.id] || 0;
-        const revStats  = revenueSumMap[song.id] || { income: 0, earning: 0, outgoing: 0 };
+        const revStats  = revenueSumMap[song.id] || { income: 0, distributor: 0, earning: 0, outgoing: 0 };
 
         // Ownership: calculated from flags exactly like songController.js
         const isRec = (song.is_recordlabel === 1 || song.is_recordlabel === true || song.is_recordlabel === '1') ? 50 : 0;
@@ -254,6 +256,7 @@ exports.getRevenueData = async (req, res) => {
           nameSinhala:   song.nameSinhala || song.name,
           isrcCode:      song.isrcCode || '—',
           income:        fmtDollar(revStats.income),
+          distributor:   fmtDollar(revStats.distributor),
           earning:       fmtDollar(revStats.earning),
           outgoing:      fmtDollar(revStats.outgoing),
           totalRevenue:  fmtDollar(revStats.income),
@@ -292,49 +295,154 @@ exports.getRevenueData = async (req, res) => {
     }
 
     if (type === 'artist' || type === 'singer') {
+      const host = `${req.protocol}://${req.get('host')}`;
+
+      // 1. Fetch all non-deleted artists
       const [artists] = await pool.query(`
-        SELECT a.id, a.name, a.status,
-          (
-            SELECT COUNT(DISTINCT song_id) FROM (
-              SELECT song_id FROM songSinger WHERE artist_id = a.id AND (status = 1 OR status IS NULL) AND (is_delete = 0 OR is_delete IS NULL)
-              UNION
-              SELECT song_id FROM songLyrics WHERE artist_id = a.id AND (status = 1 OR status IS NULL) AND (is_delete = 0 OR is_delete IS NULL)
-              UNION
-              SELECT song_id FROM songmusician WHERE artist_id = a.id AND (status = 1 OR status IS NULL) AND (is_delete = 0 OR is_delete IS NULL)
-            ) rel_songs
-          ) AS total_songs,
-          COALESCE(
-            (
-              SELECT SUM(COALESCE(r.remain_revenue, r.amount)) 
-              FROM revenue r
-              WHERE r.song_id IN (
-                SELECT song_id FROM songSinger WHERE artist_id = a.id AND (status = 1 OR status IS NULL) AND (is_delete = 0 OR is_delete IS NULL)
-                UNION
-                SELECT song_id FROM songLyrics WHERE artist_id = a.id AND (status = 1 OR status IS NULL) AND (is_delete = 0 OR is_delete IS NULL)
-                UNION
-                SELECT song_id FROM songmusician WHERE artist_id = a.id AND (status = 1 OR status IS NULL) AND (is_delete = 0 OR is_delete IS NULL)
-              )
-            ), 0
-          ) AS total_revenue
+        SELECT a.id, a.name, a.status, a.image AS image_url
         FROM artists a
         WHERE (a.is_delete = 0 OR a.is_delete IS NULL)
-        ORDER BY total_revenue DESC, a.id ASC
+        ORDER BY a.id ASC
       `);
 
-      let overallRevenue = 0;
+      // 2. For every artist, get the songs where they are main (is_main=1 or is_main IS NULL)
+      //    along with each song's revenue totals and ownership flags
+      const [mainSongRows] = await pool.query(`
+        SELECT rel.artist_id, rel.song_id, rel.role,
+               s.is_recordlabel, s.is_lyrics, s.is_musician,
+               COALESCE(rv.total_amount, 0) AS total_amount,
+               COALESCE(rv.total_distributor, 0) AS total_distributor
+        FROM (
+          SELECT ss.artist_id, ss.song_id, 'singer' AS role
+          FROM songSinger ss
+          INNER JOIN songs s ON ss.song_id = s.id AND s.status=1 AND s.is_delete=0
+          WHERE ss.status=1 AND ss.is_delete=0 AND (ss.is_main = 1 OR ss.is_main IS NULL)
+          UNION
+          SELECT sl.artist_id, sl.song_id, 'lyricist' AS role
+          FROM songLyrics sl
+          INNER JOIN songs s ON sl.song_id = s.id AND s.status=1 AND s.is_delete=0
+          WHERE sl.status=1 AND sl.is_delete=0 AND (sl.is_main = 1 OR sl.is_main IS NULL)
+          UNION
+          SELECT sm.artist_id, sm.song_id, 'musician' AS role
+          FROM songmusician sm
+          INNER JOIN songs s ON sm.song_id = s.id AND s.status=1 AND s.is_delete=0
+          WHERE sm.status=1 AND sm.is_delete=0 AND (sm.is_main = 1 OR sm.is_main IS NULL)
+        ) rel
+        INNER JOIN songs s ON rel.song_id = s.id
+        LEFT JOIN (
+          SELECT r.song_id,
+                 SUM(r.amount) AS total_amount,
+                 SUM(COALESCE(r.distributor_amount, r.amount * 0.30)) AS total_distributor
+          FROM revenue r
+          WHERE (r.status=1 OR r.status IS NULL) AND (r.is_delete=0 OR r.is_delete IS NULL)
+          GROUP BY r.song_id
+        ) rv ON rv.song_id = rel.song_id
+      `);
+
+      // 3. Build per-artist aggregation
+      // For each artist → unique songs → per song: income, distributor(30%), then
+      //   remaining 70% → earning = portions where is_recordlabel/is_lyrics/is_musician = 1
+      //                  → outgoing = portions where those flags = 0
+      const artistDataMap = {};
+      mainSongRows.forEach(row => {
+        const aid = row.artist_id;
+        if (!artistDataMap[aid]) {
+          artistDataMap[aid] = { songMap: {}, roles: new Set() };
+        }
+        artistDataMap[aid].roles.add(row.role);
+        // Only count each song once per artist (UNION already deduplicates but we join roles)
+        if (!artistDataMap[aid].songMap[row.song_id]) {
+          const amount = parseFloat(row.total_amount) || 0;
+          const distributor = parseFloat(row.total_distributor) || 0;
+          const afterDistributor = amount - distributor; // 70% of amount
+
+          // Ownership flags: which portions are "ours" (earning) vs "artist" (outgoing)
+          const isRec = (row.is_recordlabel === 1 || row.is_recordlabel === true || row.is_recordlabel === '1');
+          const isLyr = (row.is_lyrics === 1 || row.is_lyrics === true || row.is_lyrics === '1');
+          const isMus = (row.is_musician === 1 || row.is_musician === true || row.is_musician === '1');
+
+          // Each flag represents a portion: recordlabel=50%, lyrics=25%, musician=25%
+          const earningPct = (isRec ? 50 : 0) + (isLyr ? 25 : 0) + (isMus ? 25 : 0);
+          const outgoingPct = 100 - earningPct;
+
+          const earning = afterDistributor * (earningPct / 100);
+          const outgoing = afterDistributor * (outgoingPct / 100);
+
+          artistDataMap[aid].songMap[row.song_id] = {
+            income: amount,
+            distributor,
+            earning,
+            outgoing
+          };
+        }
+      });
+
+      // 4. Format result per artist
+      let overallIncome = 0;
+      let overallDistributor = 0;
+      let overallEarning = 0;
+      let overallOutgoing = 0;
+
       const formatted = artists.map(art => {
-        const rev = parseFloat(art.total_revenue) || 0;
-        overallRevenue += rev;
+        const data = artistDataMap[art.id];
+        const songCount = data ? Object.keys(data.songMap).length : 0;
+        let income = 0, distributor = 0, earning = 0, outgoing = 0;
+
+        if (data) {
+          Object.values(data.songMap).forEach(s => {
+            income += s.income;
+            distributor += s.distributor;
+            earning += s.earning;
+            outgoing += s.outgoing;
+          });
+        }
+
+        overallIncome += income;
+        overallDistributor += distributor;
+        overallEarning += earning;
+        overallOutgoing += outgoing;
+
+        const img = art.image_url;
+        const formattedImg = img
+          ? (img.startsWith('http') || img.startsWith('data:') ? img : `${host}${img.startsWith('/') ? '' : '/'}${img}`)
+          : null;
+
+        const types = [];
+        if (data) {
+          if (data.roles.has('singer')) types.push('Singer');
+          if (data.roles.has('lyricist')) types.push('Lyrics');
+          if (data.roles.has('musician')) types.push('Music');
+        }
+
+        const fmtUSD = (v) => `$${v.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+
         return {
           ...art,
           name: toTitleCase(art.name),
-          totalRevenue: rev > 0 ? `$${rev.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '$0.00'
+          image_url: formattedImg,
+          avatar: formattedImg,
+          types,
+          total_songs: songCount,
+          grossIncome: income,
+          totalEarning: earning,
+          totalOutgoing: outgoing,
+          totalDistributor: distributor,
+          totalRevenue: fmtUSD(earning),
+          income: fmtUSD(income),
+          distributor: fmtUSD(distributor),
+          earning: fmtUSD(earning),
+          outgoing: fmtUSD(outgoing)
         };
-      });
+      }).filter(a => a.total_songs > 0) // Only show artists with main-artist songs
+        .sort((a, b) => b.grossIncome - a.grossIncome); // Sort by income desc
+
+      const fmtUSD = (v) => `$${v.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
 
       const summaryCards = [
-        { id: 1, title: 'Total Artists', subtitle: 'Platform', value: `${artists.length}`, label: 'Artists' },
-        { id: 2, subtitle: 'Lifetime', subtext: `${artists.length} artists`, value: `$${overallRevenue.toLocaleString('en-US', { minimumFractionDigits: 0 })}`, label: 'Earning' }
+        { id: 1, title: 'Total Artists', subtitle: 'Platform', value: `${formatted.length}`, label: 'Artists' },
+        { id: 2, subtitle: 'Lifetime', subtext: `${formatted.length} artists`, value: fmtUSD(overallIncome), label: 'Income' },
+        { id: 3, subtitle: 'Lifetime', subtext: `${formatted.length} artists`, value: fmtUSD(overallEarning), label: 'Earning' },
+        { id: 4, subtitle: 'Lifetime', subtext: `${formatted.length} artists`, value: fmtUSD(overallOutgoing), label: 'Out going' }
       ];
 
       return res.json({
@@ -401,10 +509,10 @@ exports.getRevenueData = async (req, res) => {
           ) AS total_songs,
           COALESCE(
             (
-              SELECT SUM(COALESCE(r.remain_revenue, r.amount))
+              SELECT SUM(COALESCE(r.distributor_amount, r.amount * 0.30))
               FROM revenue r
               JOIN songdistributor sd ON r.song_id = sd.song_id AND (sd.status = 1 OR sd.status IS NULL) AND (sd.is_deleted = 0 OR sd.is_deleted IS NULL OR sd.is_delete = 0)
-              WHERE sd.distributor_id = d.id
+              WHERE sd.distributor_id = d.id AND (r.status = 1 OR r.status IS NULL) AND (r.is_delete = 0 OR r.is_delete IS NULL)
             ), 0
           ) AS total_revenue
         FROM distributors d
@@ -586,13 +694,15 @@ exports.importRevenueData = async (req, res) => {
       songFlagsMap[s.id] = (isRec + isLyr + isMus) / 100; // ownership fraction (0.00 – 1.00)
     });
 
-    // Insert into database table `revenue` with calculated remain_revenue
+    // Insert into database table `revenue` with calculated distributor_amount (30%) and remain_revenue (from 70% remaining * ownershipFraction)
     for (const row of rowsToInsert) {
       const ownershipFraction = songFlagsMap[row.songId] !== undefined ? songFlagsMap[row.songId] : 1;
-      const remainRevenue = parseFloat((row.amount * ownershipFraction).toFixed(2));
+      const distributorAmount = parseFloat((row.amount * 0.30).toFixed(2));
+      const amountAfterDistributor = row.amount * 0.70;
+      const remainRevenue = parseFloat((amountAfterDistributor * ownershipFraction).toFixed(2));
       await pool.query(
-        'INSERT INTO revenue (song_id, isrc_code, song_name, date, amount, remain_revenue) VALUES (?, ?, ?, ?, ?, ?)',
-        [row.songId, row.isrcCode, row.songName, row.date, row.amount, remainRevenue]
+        'INSERT INTO revenue (song_id, isrc_code, song_name, date, amount, distributor_amount, remain_revenue) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [row.songId, row.isrcCode, row.songName, row.date, row.amount, distributorAmount, remainRevenue]
       );
     }
 
@@ -835,31 +945,78 @@ exports.exportRevenueData = async (req, res) => {
         });
       });
     } else if (type === 'artist' || type === 'singer') {
-      const [artists] = await pool.query(`
-        SELECT a.id, a.name, a.status,
-          COALESCE((
-            SELECT SUM(COALESCE(r.remain_revenue, r.amount)) FROM revenue r
-            WHERE r.song_id IN (
-              SELECT song_id FROM songSinger WHERE artist_id = a.id
-              UNION SELECT song_id FROM songLyrics WHERE artist_id = a.id
-              UNION SELECT song_id FROM songmusician WHERE artist_id = a.id
-            )
-          ), 0) AS total_revenue
-        FROM artists a WHERE (a.is_delete = 0 OR a.is_delete IS NULL) ORDER BY total_revenue DESC, a.id ASC
+      // Same logic as getRevenueData artist - fetch main artist songs with ownership breakdown
+      const [mainSongRows] = await pool.query(`
+        SELECT rel.artist_id, a.name AS artist_name, rel.song_id,
+               s.is_recordlabel, s.is_lyrics, s.is_musician,
+               COALESCE(rv.total_amount, 0) AS total_amount,
+               COALESCE(rv.total_distributor, 0) AS total_distributor
+        FROM (
+          SELECT ss.artist_id, ss.song_id FROM songSinger ss
+          INNER JOIN songs s2 ON ss.song_id = s2.id AND s2.status=1 AND s2.is_delete=0
+          WHERE ss.status=1 AND ss.is_delete=0 AND (ss.is_main = 1 OR ss.is_main IS NULL)
+          UNION
+          SELECT sl.artist_id, sl.song_id FROM songLyrics sl
+          INNER JOIN songs s2 ON sl.song_id = s2.id AND s2.status=1 AND s2.is_delete=0
+          WHERE sl.status=1 AND sl.is_delete=0 AND (sl.is_main = 1 OR sl.is_main IS NULL)
+          UNION
+          SELECT sm.artist_id, sm.song_id FROM songmusician sm
+          INNER JOIN songs s2 ON sm.song_id = s2.id AND s2.status=1 AND s2.is_delete=0
+          WHERE sm.status=1 AND sm.is_delete=0 AND (sm.is_main = 1 OR sm.is_main IS NULL)
+        ) rel
+        INNER JOIN artists a ON rel.artist_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+        INNER JOIN songs s ON rel.song_id = s.id
+        LEFT JOIN (
+          SELECT r.song_id, SUM(r.amount) AS total_amount,
+                 SUM(COALESCE(r.distributor_amount, r.amount * 0.30)) AS total_distributor
+          FROM revenue r WHERE (r.status=1 OR r.status IS NULL) AND (r.is_delete=0 OR r.is_delete IS NULL)
+          GROUP BY r.song_id
+        ) rv ON rv.song_id = rel.song_id
       `);
+
+      // Aggregate per artist
+      const artistExportMap = {};
+      mainSongRows.forEach(row => {
+        const aid = row.artist_id;
+        if (!artistExportMap[aid]) {
+          artistExportMap[aid] = { id: aid, name: row.artist_name, income: 0, distributor: 0, earning: 0, outgoing: 0, songs: new Set() };
+        }
+        if (!artistExportMap[aid].songs.has(row.song_id)) {
+          artistExportMap[aid].songs.add(row.song_id);
+          const amount = parseFloat(row.total_amount) || 0;
+          const dist = parseFloat(row.total_distributor) || 0;
+          const afterDist = amount - dist;
+          const isRec = (row.is_recordlabel === 1 || row.is_recordlabel === true || row.is_recordlabel === '1');
+          const isLyr = (row.is_lyrics === 1 || row.is_lyrics === true || row.is_lyrics === '1');
+          const isMus = (row.is_musician === 1 || row.is_musician === true || row.is_musician === '1');
+          const earningPct = (isRec ? 50 : 0) + (isLyr ? 25 : 0) + (isMus ? 25 : 0);
+          artistExportMap[aid].income += amount;
+          artistExportMap[aid].distributor += dist;
+          artistExportMap[aid].earning += afterDist * (earningPct / 100);
+          artistExportMap[aid].outgoing += afterDist * ((100 - earningPct) / 100);
+        }
+      });
+
+      const fmtD = (v) => v > 0 ? `$${v.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '$0.00';
+      const exportArtists = Object.values(artistExportMap).sort((a, b) => b.income - a.income);
 
       worksheet.columns = [
         { header: 'Artist ID', key: 'id', width: 12 },
         { header: 'Artist Name', key: 'name', width: 30 },
-        { header: 'Total Revenue', key: 'totalRevenue', width: 20 }
+        { header: 'Income', key: 'income', width: 18 },
+        { header: 'Distributor (30%)', key: 'distributor', width: 18 },
+        { header: 'Earning', key: 'earning', width: 18 },
+        { header: 'Out Going', key: 'outgoing', width: 18 }
       ];
 
-      artists.forEach(a => {
-        const rev = parseFloat(a.total_revenue) || 0;
+      exportArtists.forEach(a => {
         worksheet.addRow({
           id: a.id,
           name: toTitleCase(a.name),
-          totalRevenue: rev > 0 ? `$${rev.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '$0.00'
+          income: fmtD(a.income),
+          distributor: fmtD(a.distributor),
+          earning: fmtD(a.earning),
+          outgoing: fmtD(a.outgoing)
         });
       });
     } else if (type === 'record_labels' || type === 'record_label') {
@@ -891,8 +1048,8 @@ exports.exportRevenueData = async (req, res) => {
       const [distributors] = await pool.query(`
         SELECT d.id, d.company_name,
           COALESCE((
-            SELECT SUM(COALESCE(r.remain_revenue, r.amount)) FROM revenue r
-            JOIN songdistributor sd ON r.song_id = sd.song_id WHERE sd.distributor_id = d.id
+            SELECT SUM(COALESCE(r.distributor_amount, r.amount * 0.30)) FROM revenue r
+            JOIN songdistributor sd ON r.song_id = sd.song_id WHERE sd.distributor_id = d.id AND (r.status = 1 OR r.status IS NULL) AND (r.is_delete = 0 OR r.is_delete IS NULL)
           ), 0) AS total_revenue
         FROM distributors d WHERE (d.is_deleted = 0 OR d.is_deleted IS NULL OR d.is_delete = 0) ORDER BY total_revenue DESC, d.id ASC
       `);
@@ -984,7 +1141,7 @@ exports.getSongRevenueDetails = async (req, res) => {
 
     // 4. Fetch revenue import history for this song (active records only)
     const [historyRows] = await pool.query(
-      `SELECT id, song_id, isrc_code, date, amount, remain_revenue, created_at
+      `SELECT id, song_id, isrc_code, date, amount, distributor_amount, remain_revenue, created_at
        FROM revenue
        WHERE song_id = ? AND (status = 1 OR status IS NULL) AND (is_delete = 0 OR is_delete IS NULL)
        ORDER BY id DESC`,
@@ -993,19 +1150,16 @@ exports.getSongRevenueDetails = async (req, res) => {
 
     // 5. Calculate metrics
     let grossIncome = 0;
-    let totalEarning = 0;
-    let totalOutgoing = 0;
+    let totalDistributor = 0;
     let minDate = null;
     let maxDate = null;
 
     historyRows.forEach(r => {
       const amt = parseFloat(r.amount) || 0;
-      const rem = parseFloat(r.remain_revenue !== null && r.remain_revenue !== undefined ? r.remain_revenue : r.amount) || 0;
-      const out = amt - rem;
+      const dist = parseFloat(r.distributor_amount) || (amt * 0.30);
 
       grossIncome += amt;
-      totalEarning += rem;
-      totalOutgoing += out;
+      totalDistributor += dist;
 
       const dStr = r.date ? String(r.date).slice(0, 10) : null;
       if (dStr && dStr !== 'null' && dStr !== 'undefined') {
@@ -1024,9 +1178,15 @@ exports.getSongRevenueDetails = async (req, res) => {
     const ownershipPct = labelPct + lyricsPct + musicPct;
     const outgoingPct = 100 - ownershipPct;
 
-    const labelShare = grossIncome * (labelPct / 100);
-    const lyricsShare = grossIncome * (lyricsPct / 100);
-    const musicShare = grossIncome * (musicPct / 100);
+    // After removing 30% distributor, compute ownership-based shares on the remaining 70%
+    const afterDistributor = grossIncome - totalDistributor;
+    const totalEarning = afterDistributor * (ownershipPct / 100);
+    const totalOutgoing = afterDistributor * (outgoingPct / 100);
+
+    // Share amounts calculated on after-distributor amount
+    const labelShare = afterDistributor * (labelPct / 100);
+    const lyricsShare = afterDistributor * (lyricsPct / 100);
+    const musicShare = afterDistributor * (musicPct / 100);
 
     const lastUpdateDate = historyRows.length > 0 && historyRows[0].created_at
       ? String(historyRows[0].created_at).slice(0, 10)
@@ -1048,6 +1208,9 @@ exports.getSongRevenueDetails = async (req, res) => {
       },
       metrics: {
         grossIncome,
+        distributorAmount: totalDistributor,
+        distributorPct: 30,
+        afterDistributor,
         totalEarning,
         totalOutgoing,
         ownershipPct,
@@ -1066,6 +1229,7 @@ exports.getSongRevenueDetails = async (req, res) => {
         id: h.id,
         date: h.date ? String(h.date).slice(0, 10) : (h.created_at ? String(h.created_at).slice(0, 10) : 'N/A'),
         amount: parseFloat(h.amount) || 0,
+        distributorAmount: parseFloat(h.distributor_amount) || 0,
         remainRevenue: parseFloat(h.remain_revenue) || 0
       }))
     });
@@ -1114,12 +1278,14 @@ exports.updateRevenueRecord = async (req, res) => {
       ownershipFraction = (isRec + isLyr + isMus) / 100;
     }
 
-    const newRemainRevenue = parseFloat((newAmountParsed * ownershipFraction).toFixed(2));
+    const newDistributorAmount = parseFloat((newAmountParsed * 0.30).toFixed(2));
+    const amountAfterDistributor = newAmountParsed * 0.70;
+    const newRemainRevenue = parseFloat((amountAfterDistributor * ownershipFraction).toFixed(2));
 
     // 3. Update database
     await pool.query(
-      `UPDATE revenue SET amount = ?, remain_revenue = ? WHERE id = ?`,
-      [newAmountParsed, newRemainRevenue, id]
+      `UPDATE revenue SET amount = ?, distributor_amount = ?, remain_revenue = ? WHERE id = ?`,
+      [newAmountParsed, newDistributorAmount, newRemainRevenue, id]
     );
 
     res.json({
@@ -1128,6 +1294,7 @@ exports.updateRevenueRecord = async (req, res) => {
       record: {
         id,
         amount: newAmountParsed,
+        distributorAmount: newDistributorAmount,
         remainRevenue: newRemainRevenue
       }
     });
@@ -1158,5 +1325,317 @@ exports.deleteRevenueRecord = async (req, res) => {
   } catch (err) {
     console.error('Error deleting revenue record:', err);
     res.status(500).json({ message: 'Failed to delete revenue record' });
+  }
+};
+
+// GET /api/revenue/artist/:id
+exports.getArtistRevenueDetails = async (req, res) => {
+  try {
+    const pool = getPool();
+    const artistId = parseInt(req.params.id, 10);
+    if (isNaN(artistId)) {
+      return res.status(400).json({ message: 'Invalid artist ID' });
+    }
+
+    const host = `${req.protocol}://${req.get('host')}`;
+
+    // 1. Artist info
+    const [artRows] = await pool.query(
+      `SELECT id, name, image AS image_url FROM artists WHERE id = ? AND (is_delete = 0 OR is_delete IS NULL)`,
+      [artistId]
+    );
+    if (artRows.length === 0) {
+      return res.status(404).json({ message: 'Artist not found' });
+    }
+    const artist = artRows[0];
+    const img = artist.image_url;
+    const formattedImg = img
+      ? (img.startsWith('http') || img.startsWith('data:') ? img : `${host}${img.startsWith('/') ? '' : '/'}${img}`)
+      : null;
+
+    // 2. Types (Singer, Lyrics, Music)
+    const [[singerRes], [lyricsRes], [musicRes]] = await Promise.all([
+      pool.query(`SELECT 1 FROM songSinger WHERE artist_id = ? AND status=1 AND is_delete=0 AND (is_main = 1 OR is_main IS NULL) LIMIT 1`, [artistId]),
+      pool.query(`SELECT 1 FROM songLyrics WHERE artist_id = ? AND status=1 AND is_delete=0 AND (is_main = 1 OR is_main IS NULL) LIMIT 1`, [artistId]),
+      pool.query(`SELECT 1 FROM songmusician WHERE artist_id = ? AND status=1 AND is_delete=0 AND (is_main = 1 OR is_main IS NULL) LIMIT 1`, [artistId])
+    ]);
+    const types = [];
+    if (singerRes.length) types.push('Singer');
+    if (lyricsRes.length) types.push('Lyrics');
+    if (musicRes.length) types.push('Music');
+
+    // 3. Distinct active songs for this artist (main artist only)
+    const [songRows] = await pool.query(`
+      SELECT DISTINCT s.id, s.name, s.nameSinhala, s.isrcCode,
+             s.is_recordlabel, s.is_lyrics, s.is_musician
+      FROM songs s
+      WHERE s.status = 1 AND s.is_delete = 0
+        AND s.id IN (
+          SELECT song_id FROM songSinger WHERE artist_id = ? AND status=1 AND is_delete=0 AND (is_main = 1 OR is_main IS NULL)
+          UNION
+          SELECT song_id FROM songLyrics WHERE artist_id = ? AND status=1 AND is_delete=0 AND (is_main = 1 OR is_main IS NULL)
+          UNION
+          SELECT song_id FROM songmusician WHERE artist_id = ? AND status=1 AND is_delete=0 AND (is_main = 1 OR is_main IS NULL)
+        )
+      ORDER BY s.id DESC
+    `, [artistId, artistId, artistId]);
+
+    if (songRows.length === 0) {
+      return res.json({
+        artist: { id: artist.id, name: toTitleCase(artist.name), image_url: formattedImg, types },
+        metrics: {
+          totalSongs: 0, distributedSongs: 0, undistributedSongs: 0,
+          grossIncome: 0, totalEarning: 0, totalOutgoing: 0,
+          distributionPct: 30, artistAmount: 0, otherArtistAmount: 0, ourAmount: 0,
+          distributorAmount: 0, distributorAmountFmt: '$0',
+          latestPeriod: 'N/A', latestAmount: 0
+        },
+        ownershipCards: [
+          { songsCount: 0, pct: '100%', label: 'Label + Music + Lyrics' },
+          { songsCount: 0, pct: '75%', label: 'Label + Music' },
+          { songsCount: 0, pct: '75%', label: 'Label + Lyrics' },
+          { songsCount: 0, pct: '50%', label: 'Label' },
+          { songsCount: 0, pct: '25%', label: 'Music or Lyrics' }
+        ],
+        songs: [],
+        history: []
+      });
+    }
+
+    const songIds = songRows.map(s => s.id);
+
+    // 4. Check distributed vs undistributed songs (active songdistributor record: status=1, is_delete=0)
+    const [distRows] = await pool.query(
+      `SELECT DISTINCT song_id FROM songdistributor WHERE song_id IN (?) AND status = 1 AND is_delete = 0`,
+      [songIds]
+    );
+    const distributedSongIds = new Set(distRows.map(d => d.song_id));
+    const distributedSongs = distributedSongIds.size;
+    const undistributedSongs = songRows.length - distributedSongs;
+
+    // 5. Calculate Ownership shared breakdown for these songs
+    let c100 = 0, c75_music = 0, c75_lyrics = 0, c50 = 0, c25 = 0;
+    songRows.forEach(s => {
+      const isRec = (s.is_recordlabel === 1 || s.is_recordlabel === true || s.is_recordlabel === '1') ? 50 : 0;
+      const isLyr = (s.is_lyrics === 1 || s.is_lyrics === true || s.is_lyrics === '1') ? 25 : 0;
+      const isMus = (s.is_musician === 1 || s.is_musician === true || s.is_musician === '1') ? 25 : 0;
+      const totalPct = isRec + isLyr + isMus;
+
+      if (totalPct === 100) c100++;
+      else if (isRec === 50 && isMus === 25) c75_music++;
+      else if (isRec === 50 && isLyr === 25) c75_lyrics++;
+      else if (isRec === 50) c50++;
+      else if (totalPct === 25) c25++;
+      else c50++; // default fallback
+    });
+
+    const ownershipCards = [
+      { songsCount: c100, pct: '100%', label: 'Label + Music + Lyrics' },
+      { songsCount: c75_music, pct: '75%', label: 'Label + Music' },
+      { songsCount: c75_lyrics, pct: '75%', label: 'Label + Lyrics' },
+      { songsCount: c50, pct: '50%', label: 'Label' },
+      { songsCount: c25, pct: '25%', label: 'Music or Lyrics' }
+    ];
+
+    // 6. Revenue totals and co-artist sharing
+    const [revRows] = await pool.query(`
+      SELECT id, song_id, song_name, date, amount, distributor_amount, remain_revenue, created_at
+      FROM revenue
+      WHERE song_id IN (?) AND status = 1 AND is_delete = 0
+      ORDER BY date DESC, created_at DESC
+    `, [songIds]);
+
+    // Fetch main artist mappings per song for songSinger, songLyrics, songmusician
+    const [mainRoles] = await pool.query(`
+      SELECT song_id, 'singer' AS role, artist_id, COALESCE(is_main, 0) AS is_main
+      FROM songSinger WHERE song_id IN (?) AND status=1 AND is_delete=0
+      UNION ALL
+      SELECT song_id, 'lyricist' AS role, artist_id, COALESCE(is_main, 0) AS is_main
+      FROM songLyrics WHERE song_id IN (?) AND status=1 AND is_delete=0
+      UNION ALL
+      SELECT song_id, 'musician' AS role, artist_id, COALESCE(is_main, 0) AS is_main
+      FROM songmusician WHERE song_id IN (?) AND status=1 AND is_delete=0
+    `, [songIds, songIds, songIds]);
+
+    const songRoleMap = {};
+    mainRoles.forEach(r => {
+      if (!songRoleMap[r.song_id]) {
+        songRoleMap[r.song_id] = { singers: [], lyricists: [], musicians: [] };
+      }
+      if (r.role === 'singer') songRoleMap[r.song_id].singers.push(r);
+      else if (r.role === 'lyricist') songRoleMap[r.song_id].lyricists.push(r);
+      else if (r.role === 'musician') songRoleMap[r.song_id].musicians.push(r);
+    });
+
+    // Helper to compute artist's exact share of outgoing revenue for a song
+    const computeArtistShare = (sId, targetArtistId, songOut) => {
+      const roles = songRoleMap[sId] || { singers: [], lyricists: [], musicians: [] };
+      let totalShares = 0;
+      let targetShares = 0;
+
+      const calcRoleShare = (roleList) => {
+        if (roleList.length === 0) return { roleTotal: 0, targetRole: 0 };
+        const mains = roleList.filter(r => r.is_main === 1);
+        const activeList = mains.length > 0 ? mains : roleList;
+        const targetMatch = activeList.find(r => String(r.artist_id) === String(targetArtistId));
+        if (targetMatch) {
+          return { roleTotal: 1, targetRole: 1 / activeList.length };
+        }
+        return { roleTotal: 1, targetRole: 0 };
+      };
+
+      const sRes = calcRoleShare(roles.singers);
+      const lRes = calcRoleShare(roles.lyricists);
+      const mRes = calcRoleShare(roles.musicians);
+
+      const categoriesCount = (sRes.roleTotal > 0 ? 1 : 0) + (lRes.roleTotal > 0 ? 1 : 0) + (mRes.roleTotal > 0 ? 1 : 0);
+      if (categoriesCount === 0) return { thisShare: 0, otherShare: songOut };
+
+      const categoryWeight = songOut / categoriesCount;
+      const targetCatShare = (sRes.targetRole * categoryWeight) + (lRes.targetRole * categoryWeight) + (mRes.targetRole * categoryWeight);
+
+      return {
+        thisShare: targetCatShare,
+        otherShare: songOut - targetCatShare
+      };
+    };
+
+    let grossIncome = 0;
+    let totalEarning = 0; // Our Amount (Ransilu)
+    let artistAmount = 0;
+    let otherArtistAmount = 0;
+    let totalDistributor = 0; // 30% distributor cut, sum of revenue.distributor_amount
+
+    const songRevSum = {};
+
+    revRows.forEach(r => {
+      const amt = parseFloat(r.amount) || 0;
+      const remain = parseFloat(r.remain_revenue);
+      const earn = !isNaN(remain) ? remain : amt;
+      const out = amt - earn;
+      const distAmt = r.distributor_amount !== null && r.distributor_amount !== undefined
+        ? parseFloat(r.distributor_amount)
+        : amt * 0.30;
+
+      grossIncome += amt;
+      totalEarning += earn;
+      totalDistributor += distAmt;
+
+      const { thisShare, otherShare } = computeArtistShare(r.song_id, artistId, out);
+
+      artistAmount += thisShare;
+      otherArtistAmount += otherShare;
+
+      if (!songRevSum[r.song_id]) songRevSum[r.song_id] = { income: 0, earning: 0 };
+      songRevSum[r.song_id].income += amt;
+      songRevSum[r.song_id].earning += earn;
+    });
+
+    const totalOutgoing = grossIncome - totalEarning;
+    const distributionPct = 30; // Fixed distributor share rate
+
+    // 7. Latest period amount
+    let latestPeriod = 'N/A';
+    let latestAmount = 0;
+    if (revRows.length > 0) {
+      const latestDateStr = revRows[0].date ? String(revRows[0].date).slice(0, 10) : '';
+      if (latestDateStr) {
+        const latestD = new Date(latestDateStr);
+        const prevMonth = new Date(latestD);
+        prevMonth.setMonth(prevMonth.getMonth() - 1);
+        const fmtD = (d) => d.toISOString().slice(0, 10).replace(/-/g, '.');
+        latestPeriod = `${fmtD(prevMonth)} to ${fmtD(latestD)}`;
+      }
+
+      // Sum latest batch amount
+      const latestBatchDate = revRows[0].date;
+      revRows.filter(r => String(r.date) === String(latestBatchDate)).forEach(r => {
+        const amt = parseFloat(r.amount) || 0;
+        const remain = parseFloat(r.remain_revenue);
+        const earn = !isNaN(remain) ? remain : amt;
+        const out = amt - earn;
+        const { thisShare } = computeArtistShare(r.song_id, artistId, out);
+        latestAmount += thisShare;
+      });
+    }
+
+    const fmtUSD = (v) => `$${(parseFloat(v) || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+
+    // 8. Build song list
+    const songs = songRows.map(song => {
+      const r = songRevSum[song.id] || { income: 0, earning: 0 };
+      const out = r.income - r.earning;
+      const isRec = (song.is_recordlabel === 1 || song.is_recordlabel === true || song.is_recordlabel === '1') ? 50 : 0;
+      const isLyr = (song.is_lyrics === 1 || song.is_lyrics === true || song.is_lyrics === '1') ? 25 : 0;
+      const isMus = (song.is_musician === 1 || song.is_musician === true || song.is_musician === '1') ? 25 : 0;
+      const ownershipPct = isRec + isLyr + isMus;
+      return {
+        id: song.id,
+        name: toTitleCase(song.name),
+        nameSinhala: song.nameSinhala || song.name,
+        isrcCode: song.isrcCode || '—',
+        ownership: ownershipPct,
+        income: fmtUSD(r.income),
+        earning: fmtUSD(r.earning),
+        outgoing: fmtUSD(out),
+        revenueAmount: r.income
+      };
+    });
+
+    // 9. History items formatted like mockup: 2026.02.13 Amount $100 -60 Songs
+    const historyMap = {};
+    revRows.forEach(r => {
+      const dateKey = r.date ? String(r.date).slice(0, 10).replace(/-/g, '.') : 'N/A';
+      if (!historyMap[dateKey]) {
+        historyMap[dateKey] = { date: dateKey, amount: 0, songIds: new Set() };
+      }
+      const amt = parseFloat(r.amount) || 0;
+      const remain = parseFloat(r.remain_revenue);
+      const earn = !isNaN(remain) ? remain : amt;
+      const out = amt - earn;
+      const { thisShare } = computeArtistShare(r.song_id, artistId, out);
+      historyMap[dateKey].amount += thisShare;
+      historyMap[dateKey].songIds.add(r.song_id);
+    });
+
+    const history = Object.values(historyMap).map(h => ({
+      date: h.date,
+      amount: Math.round(h.amount),
+      amountFmt: `$${Math.round(h.amount)}`,
+      songsCount: h.songIds.size
+    }));
+
+    res.json({
+      artist: { id: artist.id, name: toTitleCase(artist.name), image_url: formattedImg, types },
+      metrics: {
+        totalSongs: songRows.length,
+        distributedSongs,
+        undistributedSongs,
+        grossIncome: Math.round(grossIncome),
+        totalEarning: Math.round(totalEarning),
+        totalOutgoing: Math.round(totalOutgoing),
+        distributionPct,
+        artistAmount: Math.round(artistAmount),
+        otherArtistAmount: Math.round(otherArtistAmount),
+        ourAmount: Math.round(totalEarning),
+        distributorAmount: Math.round(totalDistributor),
+        latestPeriod,
+        latestAmount: Math.round(latestAmount),
+        grossIncomeFmt: `$${Math.round(grossIncome)}`,
+        totalEarningFmt: `$${Math.round(totalEarning)}`,
+        totalOutgoingFmt: `$${Math.round(totalOutgoing)}`,
+        artistAmountFmt: `$${Math.round(artistAmount)}`,
+        otherArtistAmountFmt: `$${Math.round(otherArtistAmount)}`,
+        ourAmountFmt: `$${Math.round(totalEarning)}`,
+        distributorAmountFmt: `$${Math.round(totalDistributor)}`,
+        latestAmountFmt: `$${Math.round(latestAmount)}`
+      },
+      ownershipCards,
+      songs,
+      history
+    });
+  } catch (err) {
+    console.error('Error fetching artist revenue details:', err);
+    res.status(500).json({ message: 'Failed to load artist revenue details' });
   }
 };

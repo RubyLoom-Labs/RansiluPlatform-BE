@@ -7,6 +7,7 @@ router.get('/', revenueController.getRevenueData);
 router.get('/template-export', revenueController.exportRevenueTemplate);
 router.get('/export', revenueController.exportRevenueData);
 router.get('/song/:id', revenueController.getSongRevenueDetails);
+router.get('/artist/:id', revenueController.getArtistRevenueDetails);
 router.post('/import', upload.single('file'), revenueController.importRevenueData);
 router.put('/:id', revenueController.updateRevenueRecord);
 router.delete('/:id', revenueController.deleteRevenueRecord);

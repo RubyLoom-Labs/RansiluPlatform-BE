@@ -467,32 +467,54 @@ exports.createSong = async (req, res) => {
 
     const songId = songResult.insertId;
 
-    // Insert artist relations
-    const insertRelations = async (artistIds, role) => {
+    // Insert artist relations with main artist tracking
+    const insertRelations = async (artistList, role, mainArtistId) => {
       let tableName = 'songSinger';
       if (role === 'lyricist') tableName = 'songLyrics';
       else if (role === 'musician') tableName = 'songmusician';
 
-      for (const idVal of artistIds) {
+      if (!Array.isArray(artistList) || artistList.length === 0) return;
+
+      const itemsToInsert = [];
+      for (const item of artistList) {
+        let idVal = item;
+        let isMain = false;
+        if (typeof item === 'object' && item !== null) {
+          idVal = item.id || item.value;
+          isMain = !!item.isMain;
+        }
         let artistId = parseInt(idVal, 10);
         if (isNaN(artistId)) {
           const [artist] = await pool.query('SELECT id FROM artists WHERE name = ? OR artist_code = ?', [idVal, idVal]);
-          if (artist.length > 0) {
-            artistId = artist[0].id;
-          } else {
-            continue;
-          }
+          if (artist.length > 0) artistId = artist[0].id;
+          else continue;
         }
+        if (mainArtistId && String(artistId) === String(mainArtistId)) {
+          isMain = true;
+        }
+        itemsToInsert.push({ artistId, isMain });
+      }
+
+      if (itemsToInsert.length === 0) return;
+
+      // If no item is marked as main, default the first item to is_main = 1
+      if (!itemsToInsert.some(i => i.isMain)) {
+        itemsToInsert[0].isMain = true;
+      }
+
+      for (const item of itemsToInsert) {
         await pool.query(
-          `INSERT INTO ${tableName} (song_id, artist_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE song_id = song_id`,
-          [songId, artistId]
+          `INSERT INTO ${tableName} (song_id, artist_id, is_main, status, is_delete) 
+           VALUES (?, ?, ?, 1, 0) 
+           ON DUPLICATE KEY UPDATE is_main = VALUES(is_main), status = 1, is_delete = 0`,
+          [songId, item.artistId, item.isMain ? 1 : 0]
         );
       }
     };
 
-    await insertRelations(singers, 'singer');
-    await insertRelations(lyricists, 'lyricist');
-    await insertRelations(musicians, 'musician');
+    await insertRelations(singers, 'singer', req.body.mainSinger || req.body.mainSingerId);
+    await insertRelations(lyricists, 'lyricist', req.body.mainLyricist || req.body.mainLyricistId);
+    await insertRelations(musicians, 'musician', req.body.mainMusician || req.body.mainMusicianId);
 
     // 1. Save distributor mapping
     let distributorId = null;
@@ -573,22 +595,23 @@ exports.createSong = async (req, res) => {
       }
     }
 
-    const getArtistNamesByRole = async (role) => {
-      let tableName = 'songSinger';
-      if (role === 'lyricist') tableName = 'songLyrics';
-      else if (role === 'musician') tableName = 'songmusician';
-
+    const getArtistDetailsByRole = async (tableName) => {
       const [artists] = await pool.query(`
-        SELECT a.name FROM ${tableName} t 
+        SELECT t.artist_id, a.name, COALESCE(t.is_main, 0) as is_main
+        FROM ${tableName} t 
         JOIN artists a ON t.artist_id = a.id 
         WHERE t.song_id = ?
       `, [songId]);
-      return artists.map(a => a.name);
+      return artists;
     };
 
-    const singerNames = await getArtistNamesByRole('singer');
-    const lyricistNames = await getArtistNamesByRole('lyricist');
-    const musicianNames = await getArtistNamesByRole('musician');
+    const singersData = await getArtistDetailsByRole('songSinger');
+    const lyricistsData = await getArtistDetailsByRole('songLyrics');
+    const musiciansData = await getArtistDetailsByRole('songmusician');
+
+    const mainSingerObj = singersData.find(s => s.is_main === 1) || singersData[0];
+    const mainLyricistObj = lyricistsData.find(l => l.is_main === 1) || lyricistsData[0];
+    const mainMusicianObj = musiciansData.find(m => m.is_main === 1) || musiciansData[0];
 
     const host = `${req.protocol}://${req.get('host')}`;
 
@@ -600,10 +623,10 @@ exports.createSong = async (req, res) => {
       name: toTitleCase(lowercaseName),
       nameSinhala,
       status: 'Active',
-      artist: singerNames.length > 0 ? singerNames.join(', ') : 'None',
-      artistSub: singerNames.length > 1 ? 'Due - Second Artist' : '',
-      lyrics: lyricistNames.length > 0 ? lyricistNames.join(', ') : 'None',
-      music: musicianNames.length > 0 ? musicianNames.join(', ') : 'None',
+      artist: singersData.length > 0 ? singersData.map(s => s.name).join(', ') : 'None',
+      artistSub: singersData.length > 1 ? 'Due - Second Artist' : '',
+      lyrics: lyricistsData.length > 0 ? lyricistsData.map(l => l.name).join(', ') : 'None',
+      music: musiciansData.length > 0 ? musiciansData.map(m => m.name).join(', ') : 'None',
       ownership: 100,
       notes: 'No Cases Or Notes',
       conflict: 'No',
@@ -622,6 +645,15 @@ exports.createSong = async (req, res) => {
       ringtones: savedRingtones,
       trackUrl: `${host}${trackUrl}`,
       imageUrl: `${host}${imageUrl}`,
+      singers: singersData.map(s => String(s.artist_id)),
+      lyricists: lyricistsData.map(l => String(l.artist_id)),
+      musicians: musiciansData.map(m => String(m.artist_id)),
+      mainSingerId: mainSingerObj ? String(mainSingerObj.artist_id) : null,
+      mainLyricistId: mainLyricistObj ? String(mainLyricistObj.artist_id) : null,
+      mainMusicianId: mainMusicianObj ? String(mainMusicianObj.artist_id) : null,
+      singersList: singersData.map(s => ({ id: String(s.artist_id), name: s.name, isMain: s.is_main === 1 })),
+      lyricistsList: lyricistsData.map(l => ({ id: String(l.artist_id), name: l.name, isMain: l.is_main === 1 })),
+      musiciansList: musiciansData.map(m => ({ id: String(m.artist_id), name: m.name, isMain: m.is_main === 1 })),
       createdAt: new Date(),
     });
   } catch (error) {
@@ -676,23 +708,23 @@ exports.getSongById = async (req, res) => {
     }
     const song = songs[0];
 
-    // Fetch singer, lyricist, musician relations
+    // Fetch singer, lyricist, musician relations with is_main flag
     const [singers] = await pool.query(`
-      SELECT ss.artist_id, a.name 
+      SELECT ss.artist_id, a.name, COALESCE(ss.is_main, 0) as is_main
       FROM songSinger ss 
       JOIN artists a ON ss.artist_id = a.id 
       WHERE ss.song_id = ?
     `, [songId]);
     
     const [lyricists] = await pool.query(`
-      SELECT sl.artist_id, a.name 
+      SELECT sl.artist_id, a.name, COALESCE(sl.is_main, 0) as is_main
       FROM songLyrics sl 
       JOIN artists a ON sl.artist_id = a.id 
       WHERE sl.song_id = ?
     `, [songId]);
     
     const [musicians] = await pool.query(`
-      SELECT sm.artist_id, a.name 
+      SELECT sm.artist_id, a.name, COALESCE(sm.is_main, 0) as is_main
       FROM songmusician sm 
       JOIN artists a ON sm.artist_id = a.id 
       WHERE sm.song_id = ?
@@ -750,6 +782,10 @@ exports.getSongById = async (req, res) => {
     });
     const labelsText = labelList.map(l => l.name).join(', ') || 'None';
 
+    const mainSingerObj = singers.find(s => s.is_main === 1) || singers[0];
+    const mainLyricistObj = lyricists.find(l => l.is_main === 1) || lyricists[0];
+    const mainMusicianObj = musicians.find(m => m.is_main === 1) || musicians[0];
+
     res.json({
       id: song.id,
       name: toTitleCase(song.name), // Title Case song name on fetch
@@ -776,6 +812,12 @@ exports.getSongById = async (req, res) => {
       singers: singers.map(s => String(s.artist_id)),
       lyricists: lyricists.map(l => String(l.artist_id)),
       musicians: musicians.map(m => String(m.artist_id)),
+      mainSingerId: mainSingerObj ? String(mainSingerObj.artist_id) : null,
+      mainLyricistId: mainLyricistObj ? String(mainLyricistObj.artist_id) : null,
+      mainMusicianId: mainMusicianObj ? String(mainMusicianObj.artist_id) : null,
+      singersList: singers.map(s => ({ id: String(s.artist_id), name: s.name, isMain: s.is_main === 1 })),
+      lyricistsList: lyricists.map(l => ({ id: String(l.artist_id), name: l.name, isMain: l.is_main === 1 })),
+      musiciansList: musicians.map(m => ({ id: String(m.artist_id), name: m.name, isMain: m.is_main === 1 })),
       artist: singers.length > 0 ? singers.map(s => s.name).join(', ') : 'None',
       lyrics: lyricists.length > 0 ? lyricists.map(l => l.name).join(', ') : 'None',
       music: musicians.length > 0 ? musicians.map(m => m.name).join(', ') : 'None',
@@ -883,27 +925,49 @@ exports.updateSong = async (req, res) => {
     await pool.query('DELETE FROM songLyrics WHERE song_id = ?', [songId]);
     await pool.query('DELETE FROM songmusician WHERE song_id = ?', [songId]);
 
-    const insertRelations = async (artistIds, tableName) => {
-      for (const idVal of artistIds) {
+    const insertRelations = async (artistList, tableName, mainArtistId) => {
+      if (!Array.isArray(artistList) || artistList.length === 0) return;
+
+      const itemsToInsert = [];
+      for (const item of artistList) {
+        let idVal = item;
+        let isMain = false;
+        if (typeof item === 'object' && item !== null) {
+          idVal = item.id || item.value;
+          isMain = !!item.isMain;
+        }
         let artistId = parseInt(idVal, 10);
         if (isNaN(artistId)) {
           const [artist] = await pool.query('SELECT id FROM artists WHERE name = ? OR artist_code = ?', [idVal, idVal]);
-          if (artist.length > 0) {
-            artistId = artist[0].id;
-          } else {
-            continue;
-          }
+          if (artist.length > 0) artistId = artist[0].id;
+          else continue;
         }
+        if (mainArtistId && String(artistId) === String(mainArtistId)) {
+          isMain = true;
+        }
+        itemsToInsert.push({ artistId, isMain });
+      }
+
+      if (itemsToInsert.length === 0) return;
+
+      // If no item is marked as main, default the first item to is_main = 1
+      if (!itemsToInsert.some(i => i.isMain)) {
+        itemsToInsert[0].isMain = true;
+      }
+
+      for (const item of itemsToInsert) {
         await pool.query(
-          `INSERT INTO ${tableName} (song_id, artist_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE song_id = song_id`,
-          [songId, artistId]
+          `INSERT INTO ${tableName} (song_id, artist_id, is_main, status, is_delete) 
+           VALUES (?, ?, ?, 1, 0) 
+           ON DUPLICATE KEY UPDATE is_main = VALUES(is_main), status = 1, is_delete = 0`,
+          [songId, item.artistId, item.isMain ? 1 : 0]
         );
       }
     };
 
-    if (Array.isArray(singers)) await insertRelations(singers, 'songSinger');
-    if (Array.isArray(lyricists)) await insertRelations(lyricists, 'songLyrics');
-    if (Array.isArray(musicians)) await insertRelations(musicians, 'songmusician');
+    if (Array.isArray(singers)) await insertRelations(singers, 'songSinger', req.body.mainSinger || req.body.mainSingerId);
+    if (Array.isArray(lyricists)) await insertRelations(lyricists, 'songLyrics', req.body.mainLyricist || req.body.mainLyricistId);
+    if (Array.isArray(musicians)) await insertRelations(musicians, 'songmusician', req.body.mainMusician || req.body.mainMusicianId);
 
     // 3. Save distributor mapping
     let distributorId = null;
@@ -991,7 +1055,7 @@ exports.updateSong = async (req, res) => {
 
     const getArtistDetailsByRole = async (tableName) => {
       const [artists] = await pool.query(`
-        SELECT a.id, a.name FROM ${tableName} t 
+        SELECT a.id, a.name, COALESCE(t.is_main, 0) as is_main FROM ${tableName} t 
         JOIN artists a ON t.artist_id = a.id 
         WHERE t.song_id = ?
       `, [songId]);
@@ -1001,6 +1065,10 @@ exports.updateSong = async (req, res) => {
     const singersData = await getArtistDetailsByRole('songSinger');
     const lyricistsData = await getArtistDetailsByRole('songLyrics');
     const musiciansData = await getArtistDetailsByRole('songmusician');
+
+    const mainSingerObj = singersData.find(s => s.is_main === 1) || singersData[0];
+    const mainLyricistObj = lyricistsData.find(l => l.is_main === 1) || lyricistsData[0];
+    const mainMusicianObj = musiciansData.find(m => m.is_main === 1) || musiciansData[0];
 
     const host = `${req.protocol}://${req.get('host')}`;
 
@@ -1037,6 +1105,12 @@ exports.updateSong = async (req, res) => {
       singers: singersData.map(s => String(s.id)),
       lyricists: lyricistsData.map(l => String(l.id)),
       musicians: musiciansData.map(m => String(m.id)),
+      mainSingerId: mainSingerObj ? String(mainSingerObj.id) : null,
+      mainLyricistId: mainLyricistObj ? String(mainLyricistObj.id) : null,
+      mainMusicianId: mainMusicianObj ? String(mainMusicianObj.id) : null,
+      singersList: singersData.map(s => ({ id: String(s.id), name: s.name, isMain: s.is_main === 1 })),
+      lyricistsList: lyricistsData.map(l => ({ id: String(l.id), name: l.name, isMain: l.is_main === 1 })),
+      musiciansList: musiciansData.map(m => ({ id: String(m.id), name: m.name, isMain: m.is_main === 1 })),
     });
   } catch (error) {
     console.error('Error updating song:', error);

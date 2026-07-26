@@ -2072,8 +2072,11 @@ exports.inactivateSong = async (req, res) => {
       return res.status(400).json({ message: 'Invalid song ID' });
     }
 
-    // 1. Update song status to 0 (Inactive), keeping is_delete = 0
-    await pool.query('UPDATE songs SET status = 0, is_delete = 0 WHERE id = ?', [songId]);
+    // 1. Update song status to 0 (Inactive) and reset ownership flags
+    await pool.query(
+      'UPDATE songs SET status = 0, is_delete = 0, is_singer = 0, is_lyrics = 0, is_musician = 0, is_recordlabel = 0 WHERE id = ?',
+      [songId]
+    );
 
     // 2. Update status = 0 across the 8 relationship tables (keeping is_delete = 0)
     const safeUpdate = async (queryStr, params) => {
@@ -2179,6 +2182,17 @@ exports.activateSong = async (req, res) => {
     `, [songId]);
 
     // NOTE: songdistributor is EXCLUDED from reactivation as requested.
+
+    // 9. Recalculate ownership flags (is_singer, is_lyrics, is_musician, is_recordlabel)
+    //    based on active ownershipsong rows linked to ownership docs where is_ownership = 1
+    try {
+      const { syncSongOwnership } = require('./ownershipController');
+      if (typeof syncSongOwnership === 'function') {
+        await syncSongOwnership(pool, [songId]);
+      }
+    } catch (syncErr) {
+      console.warn('Could not recalculate ownership flags on reactivation:', syncErr.message);
+    }
 
     res.json({ success: true, message: 'Song and associated active records reactivated successfully' });
   } catch (error) {

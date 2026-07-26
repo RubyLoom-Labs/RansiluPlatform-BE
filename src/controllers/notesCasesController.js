@@ -32,6 +32,8 @@ exports.getNotesCases = async (req, res) => {
       conditions.push('nc.status = 1');
     } else if (statusParam === 'closed' || statusParam === '0' || statusParam === 0) {
       conditions.push('nc.status = 0');
+    } else if (statusParam === 'all') {
+      // Do not restrict status (returns both open and closed)
     } else {
       // Default to open records (status = 1, is_delete = 0)
       conditions.push('nc.status = 1');
@@ -42,10 +44,37 @@ exports.getNotesCases = async (req, res) => {
       params.push(typeParam);
     }
 
+    const songIdParam = req.query.songId || req.query.song_id;
+    const songNameParam = req.query.songName || req.query.song_name;
+    const linkResultParam = req.query.linkResult || req.query.link_result;
+
+    if (songIdParam || songNameParam || linkResultParam) {
+      const matchers = [];
+      if (songIdParam) {
+        matchers.push('nc.link_result = ?');
+        params.push(String(songIdParam));
+        matchers.push('nc.link_result LIKE ?');
+        params.push(`%${songIdParam}%`);
+      }
+      if (songNameParam) {
+        matchers.push('nc.link_result LIKE ?');
+        params.push(`%${songNameParam}%`);
+        matchers.push('nc.name LIKE ?');
+        params.push(`%${songNameParam}%`);
+      }
+      if (linkResultParam && linkResultParam !== songIdParam && linkResultParam !== songNameParam) {
+        matchers.push('nc.link_result LIKE ?');
+        params.push(`%${linkResultParam}%`);
+      }
+      if (matchers.length > 0) {
+        conditions.push(`(${matchers.join(' OR ')})`);
+      }
+    }
+
     if (searchQuery) {
-      conditions.push('(nc.name LIKE ? OR nc.tags LIKE ? OR nc.description LIKE ?)');
+      conditions.push('(nc.name LIKE ? OR nc.tags LIKE ? OR nc.description LIKE ? OR nc.link_result LIKE ?)');
       const term = `%${searchQuery}%`;
-      params.push(term, term, term);
+      params.push(term, term, term, term);
     }
 
     const whereClause = conditions.join(' AND ');

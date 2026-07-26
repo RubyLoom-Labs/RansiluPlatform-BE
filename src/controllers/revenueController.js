@@ -4,11 +4,50 @@ const ExcelJS = require('exceljs');
 // Helper for title case
 function toTitleCase(str) {
   if (!str) return '';
-  return str
+  return String(str)
     .toLowerCase()
     .split(' ')
     .map(word => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
+}
+
+async function fetchSongNotesCasesMap(songs, pool) {
+  if (!Array.isArray(songs) || songs.length === 0) return {};
+  try {
+    const [ncRows] = await pool.query(
+      `SELECT id, type, name, link_type, link_result
+       FROM notesandcases
+       WHERE status = 1 AND is_delete = 0`
+    );
+
+    const map = {};
+    songs.forEach(song => {
+      const sIdStr = String(song.id);
+      const sName = (song.name || '').toLowerCase().trim();
+      const sSinhala = (song.nameSinhala || '').toLowerCase().trim();
+
+      const matchedItems = ncRows.filter(r => {
+        const linkVal = (r.link_result || '').toLowerCase().trim();
+        if (!linkVal) return false;
+        if (linkVal === sIdStr) return true;
+        if (sName && (linkVal.includes(sName) || linkVal === sName)) return true;
+        if (sSinhala && (linkVal.includes(sSinhala) || linkVal === sSinhala)) return true;
+        if (r.name && sName && r.name.toLowerCase().includes(sName)) return true;
+        return false;
+      });
+
+      if (matchedItems.length > 0) {
+        map[song.id] = matchedItems.map(m => `${m.type === 'case' ? 'Case' : 'Note'}: ${m.name}`).join('; ');
+      } else {
+        map[song.id] = song.notes && song.notes.trim() ? song.notes : 'No Cases Or Notes';
+      }
+    });
+
+    return map;
+  } catch (err) {
+    console.error('Error fetching song notes/cases map:', err);
+    return {};
+  }
 }
 
 // GET /api/revenue (Get revenue metrics & list by type)
@@ -59,9 +98,12 @@ exports.getRevenueData = async (req, res) => {
           ORDER BY s.id DESC
         `),
 
-        // 2. Revenue sums per song (with optional date range using remain_revenue)
+        // 2. Revenue sums per song (Income, Earning, Outgoing)
         pool.query(`
-          SELECT r.song_id, SUM(COALESCE(r.remain_revenue, r.amount)) AS total_amount
+          SELECT r.song_id,
+                 SUM(r.amount) AS total_income,
+                 SUM(COALESCE(r.remain_revenue, r.amount)) AS total_earning,
+                 SUM(r.amount - COALESCE(r.remain_revenue, r.amount)) AS total_outgoing
           FROM revenue r
           INNER JOIN songs s ON s.id = r.song_id AND s.status = 1 AND s.is_delete = 0
           WHERE 1=1 ${dateWhere}
@@ -151,7 +193,11 @@ exports.getRevenueData = async (req, res) => {
       // ── Build lookup maps (O(n) hash maps instead of nested loops) ───────
       const revenueSumMap = {};
       revenueSumRows.forEach(r => {
-        revenueSumMap[r.song_id] = parseFloat(r.total_amount) || 0;
+        revenueSumMap[r.song_id] = {
+          income: parseFloat(r.total_income) || 0,
+          earning: parseFloat(r.total_earning) || 0,
+          outgoing: parseFloat(r.total_outgoing) || 0
+        };
       });
 
       const songRelations = {};
@@ -185,12 +231,14 @@ exports.getRevenueData = async (req, res) => {
         songConflictsMap[row.song_id] = parseInt(row.cCount, 10) || 0;
       });
 
+      const songNotesCasesMap = await fetchSongNotesCasesMap(songs, pool);
+
       // ── Format song list ─────────────────────────────────────────────────
       const formattedSongs = songs.map(song => {
         const rels      = songRelations[song.id]  || { singers: [], lyricists: [], musicians: [] };
         const labelList = songLabels[song.id]     || [];
         const cCount    = songConflictsMap[song.id] || 0;
-        const sumAmt    = revenueSumMap[song.id]   || 0;
+        const revStats  = revenueSumMap[song.id] || { income: 0, earning: 0, outgoing: 0 };
 
         // Ownership: calculated from flags exactly like songController.js
         const isRec = (song.is_recordlabel === 1 || song.is_recordlabel === true || song.is_recordlabel === '1') ? 50 : 0;
@@ -198,24 +246,21 @@ exports.getRevenueData = async (req, res) => {
         const isMus = (song.is_musician    === 1 || song.is_musician    === true || song.is_musician    === '1') ? 25 : 0;
         const ownershipRaw = isRec + isLyr + isMus;
 
+        const fmtDollar = (val) => val > 0 ? `$${val.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '$0.00';
+
         return {
           id:            song.id,
           name:          toTitleCase(song.name),
           nameSinhala:   song.nameSinhala || song.name,
           isrcCode:      song.isrcCode || '—',
-          totalRevenue:  sumAmt > 0 ? `$${sumAmt.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '$0.00',
-          revenueAmount: sumAmt,
+          income:        fmtDollar(revStats.income),
+          earning:       fmtDollar(revStats.earning),
+          outgoing:      fmtDollar(revStats.outgoing),
+          totalRevenue:  fmtDollar(revStats.income),
+          revenueAmount: revStats.income,
           artist:        rels.singers.length    > 0 ? rels.singers.join(', ')    : '—',
           artistSub:     rels.singers.length    > 1 ? rels.singers.slice(1).join(', ') : '',
-          lyrics:        rels.lyricists.length  > 0 ? rels.lyricists.join(', ')  : '—',
-          music:         rels.musicians.length  > 0 ? rels.musicians.join(', ')  : '—',
-          labels:        labelList,
-          recordLabels:  labelList,
           ownership:     ownershipRaw,   // raw number — FE renders "N%"
-          notes:         song.notes || '—',
-          conflictCount: cCount,
-          conflicts:     cCount > 0 ? 'Yes' : 'No',
-          conflict:      cCount > 0 ? 'Yes' : 'No'
         };
       });
 
@@ -582,9 +627,13 @@ exports.exportRevenueData = async (req, res) => {
         ORDER BY s.id ASC
       `);
 
-      // 2. Fetch revenue rows with optional date filtering using remain_revenue
+      // 2. Fetch revenue rows with Income, Earning, and Outgoing breakdown
       let revQuery = `
-        SELECT song_id, isrc_code, song_name, date, COALESCE(remain_revenue, amount) as amount, DATE_FORMAT(date, '%Y-%m-%d') as dateStr
+        SELECT song_id, isrc_code, song_name, date,
+               amount,
+               COALESCE(remain_revenue, amount) AS remain_revenue,
+               (amount - COALESCE(remain_revenue, amount)) AS outgoing_revenue,
+               DATE_FORMAT(date, '%Y-%m-%d') as dateStr
         FROM revenue
         WHERE 1=1
       `;
@@ -603,89 +652,187 @@ exports.exportRevenueData = async (req, res) => {
 
       // 3. Collect distinct dates chronologically & group revenue per song per date
       const distinctDatesSet = new Set();
-      const songDateMap = {}; // { [song_id]: { totalAmount: 0, dates: { [dateStr]: amountSum } } }
+      const songDateMap = {};
 
-      // Helper: normalize any date value to 'YYYY-MM-DD' string
+      // Helper: normalize any date value to 'YYYY-MM-DD' string, returning null for non-dates
       const normalizeDateStr = (val) => {
         if (!val) return null;
-        // DATE_FORMAT already returns a string like '2026-07-25'
-        if (typeof val === 'string') return val.slice(0, 10);
-        // MySQL date columns come back as JS Date objects
-        if (val instanceof Date) {
-          const y = val.getFullYear();
-          const m = String(val.getMonth() + 1).padStart(2, '0');
-          const d = String(val.getDate()).padStart(2, '0');
-          return `${y}-${m}-${d}`;
-        }
-        return String(val).slice(0, 10);
+        const str = String(val).trim();
+        const parsed = new Date(str);
+        if (isNaN(parsed.getTime())) return null;
+
+        const y = parsed.getFullYear();
+        const m = String(parsed.getMonth() + 1).padStart(2, '0');
+        const d = String(parsed.getDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
       };
 
       revenueRows.forEach(r => {
         const sId = r.song_id;
-        // Use dateStr (from DATE_FORMAT) first; fall back to r.date if needed
-        const dStr = normalizeDateStr(r.dateStr || r.date);
-        const amt = parseFloat(r.amount) || 0;
+        const dStr = normalizeDateStr(r.date || r.dateStr);
+        if (!dStr) return; // Skip invalid date records
 
-        if (dStr) {
-          distinctDatesSet.add(dStr);
-        }
+        const inc = parseFloat(r.amount) || 0;
+        const earn = parseFloat(r.remain_revenue) || 0;
+        const out = parseFloat(r.outgoing_revenue) || 0;
+
+        distinctDatesSet.add(dStr);
 
         if (!songDateMap[sId]) {
-          songDateMap[sId] = { totalAmount: 0, dates: {} };
+          songDateMap[sId] = {
+            totalIncome: 0,
+            totalEarning: 0,
+            totalOutgoing: 0,
+            dates: {}
+          };
         }
-        songDateMap[sId].totalAmount += amt;
 
-        if (dStr) {
-          songDateMap[sId].dates[dStr] = (songDateMap[sId].dates[dStr] || 0) + amt;
+        songDateMap[sId].totalIncome += inc;
+        songDateMap[sId].totalEarning += earn;
+        songDateMap[sId].totalOutgoing += out;
+
+        if (!songDateMap[sId].dates[dStr]) {
+          songDateMap[sId].dates[dStr] = { income: 0, earning: 0, outgoing: 0 };
         }
+        songDateMap[sId].dates[dStr].income += inc;
+        songDateMap[sId].dates[dStr].earning += earn;
+        songDateMap[sId].dates[dStr].outgoing += out;
       });
 
       const sortedDistinctDates = Array.from(distinctDatesSet).sort();
 
-      // 4. Define Columns exact as requested:
-      // Column 1: Song ID, Column 2: ISRC Code, Column 3: Song Name, Column 4: Sinhala Name, Column 5: Total Amount,
-      // Column 6+: Dynamic Date columns (each enter date wise revenue)
-      const columns = [
-        { header: 'Song ID', key: 'id', width: 12 },
-        { header: 'ISRC Code', key: 'isrcCode', width: 22 },
-        { header: 'Song Name', key: 'name', width: 30 },
-        { header: 'Sinhala Name', key: 'nameSinhala', width: 30 },
-        { header: 'Total Amount', key: 'totalAmount', width: 18 }
-      ];
+      // 4. Multi-level headers with separator columns and distinct colors
+      const datePalette = ['047857', '6D28D9', 'C2410C', '0284C7', 'B91C1C', '4338CA'];
 
+      // Row 1 Values:
+      const headerRow1Vals = ['Song Details', '', '', '', '', 'Total Revenue', '', ''];
       sortedDistinctDates.forEach(dStr => {
-        columns.push({
-          header: dStr,
-          key: `date_${dStr}`,
-          width: 16
-        });
+        headerRow1Vals.push('', dStr, '', '');
       });
 
-      worksheet.columns = columns;
+      // Row 2 Values:
+      const headerRow2Vals = ['Song ID', 'ISRC Code', 'Song Name', 'Sinhala Name', '', 'Income', 'Earning', 'Out Going'];
+      sortedDistinctDates.forEach(() => {
+        headerRow2Vals.push('', 'Income', 'Earning', 'Out Going');
+      });
 
-      // Style header row
-      const headerRow = worksheet.getRow(1);
-      headerRow.font = { bold: true, color: { argb: 'FFFFFF' }, size: 11 };
-      headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: '0B66E3' } };
-      headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+      const row1 = worksheet.addRow(headerRow1Vals);
+      const row2 = worksheet.addRow(headerRow2Vals);
 
-      // 5. Add rows for each song
-      songs.forEach(s => {
-        const revData = songDateMap[s.id] || { totalAmount: 0, dates: {} };
-        const rowObj = {
-          id: s.id,
-          isrcCode: s.isrcCode || '—',
-          name: toTitleCase(s.name),
-          nameSinhala: s.nameSinhala || s.name,
-          totalAmount: revData.totalAmount > 0 ? `$${revData.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '$0.00'
-        };
+      // Merge header cells:
+      worksheet.mergeCells(1, 1, 1, 4); // Song Details (Cols 1-4)
+      worksheet.mergeCells(1, 6, 1, 8); // Total Revenue (Cols 6-8)
 
-        sortedDistinctDates.forEach(dStr => {
-          const dayAmt = revData.dates[dStr];
-          rowObj[`date_${dStr}`] = dayAmt !== undefined ? `$${dayAmt.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '';
+      let colPtr = 9;
+      sortedDistinctDates.forEach(() => {
+        worksheet.mergeCells(1, colPtr + 1, 1, colPtr + 3); // Date Header (3 cols)
+        colPtr += 4;
+      });
+
+      // Style Song Details Header (Cols 1-4)
+      for (let c = 1; c <= 4; c++) {
+        [row1, row2].forEach(r => {
+          const cell = r.getCell(c);
+          cell.font = { bold: true, color: { argb: 'FFFFFF' }, size: 10 };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: '1E293B' } };
+          cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        });
+      }
+
+      // Style Separator Col 5
+      [row1, row2].forEach(r => {
+        const cell = r.getCell(5);
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'CBD5E1' } };
+      });
+      worksheet.getColumn(5).width = 3;
+
+      // Style Total Revenue Header (Cols 6-8)
+      for (let c = 6; c <= 8; c++) {
+        [row1, row2].forEach(r => {
+          const cell = r.getCell(c);
+          cell.font = { bold: true, color: { argb: 'FFFFFF' }, size: 10 };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: '0B66E3' } };
+          cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        });
+      }
+
+      // Style Dynamic Date Headers
+      colPtr = 9;
+      sortedDistinctDates.forEach((dStr, idx) => {
+        const colorHex = datePalette[idx % datePalette.length];
+
+        // Separator column
+        const sepCol = colPtr;
+        worksheet.getColumn(sepCol).width = 3;
+        [row1, row2].forEach(r => {
+          r.getCell(sepCol).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'CBD5E1' } };
         });
 
-        worksheet.addRow(rowObj);
+        // 3 Date Sub-columns
+        for (let c = colPtr + 1; c <= colPtr + 3; c++) {
+          [row1, row2].forEach(r => {
+            const cell = r.getCell(c);
+            cell.font = { bold: true, color: { argb: 'FFFFFF' }, size: 10 };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: colorHex } };
+            cell.alignment = { vertical: 'middle', horizontal: 'center' };
+          });
+        }
+
+        colPtr += 4;
+      });
+
+      // Set base column widths
+      worksheet.getColumn(1).width = 12;
+      worksheet.getColumn(2).width = 20;
+      worksheet.getColumn(3).width = 28;
+      worksheet.getColumn(4).width = 28;
+      worksheet.getColumn(6).width = 15;
+      worksheet.getColumn(7).width = 15;
+      worksheet.getColumn(8).width = 15;
+
+      colPtr = 9;
+      sortedDistinctDates.forEach(() => {
+        worksheet.getColumn(colPtr + 1).width = 15;
+        worksheet.getColumn(colPtr + 2).width = 15;
+        worksheet.getColumn(colPtr + 3).width = 15;
+        colPtr += 4;
+      });
+
+      // 5. Add Data Rows for each song
+      songs.forEach(s => {
+        const revData = songDateMap[s.id] || { totalIncome: 0, totalEarning: 0, totalOutgoing: 0, dates: {} };
+        const fmtDollar = (val) => val > 0 ? `$${val.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '$0.00';
+
+        const rowValues = [
+          s.id,
+          s.isrcCode || '—',
+          toTitleCase(s.name),
+          s.nameSinhala || s.name,
+          '', // Blank separator col 5
+          fmtDollar(revData.totalIncome),
+          fmtDollar(revData.totalEarning),
+          fmtDollar(revData.totalOutgoing)
+        ];
+
+        sortedDistinctDates.forEach(dStr => {
+          rowValues.push(''); // Blank separator col
+          const dayData = revData.dates[dStr];
+          if (dayData) {
+            rowValues.push(fmtDollar(dayData.income), fmtDollar(dayData.earning), fmtDollar(dayData.outgoing));
+          } else {
+            rowValues.push('$0.00', '$0.00', '$0.00');
+          }
+        });
+
+        const addedRow = worksheet.addRow(rowValues);
+
+        // Fill background of blank separator cells in data rows
+        addedRow.getCell(5).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F1F5F9' } };
+        let sepPtr = 9;
+        sortedDistinctDates.forEach(() => {
+          addedRow.getCell(sepPtr).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F1F5F9' } };
+          sepPtr += 4;
+        });
       });
     } else if (type === 'artist' || type === 'singer') {
       const [artists] = await pool.query(`
@@ -777,5 +924,239 @@ exports.exportRevenueData = async (req, res) => {
   } catch (error) {
     console.error('Error exporting revenue data:', error);
     res.status(500).json({ message: 'Failed to export revenue data' });
+  }
+};
+
+// GET /api/revenue/song/:id
+exports.getSongRevenueDetails = async (req, res) => {
+  try {
+    const pool = getPool();
+    const songId = parseInt(req.params.id, 10);
+    if (isNaN(songId)) {
+      return res.status(400).json({ message: 'Invalid song ID' });
+    }
+
+    // 1. Fetch song basic info & flags
+    const [songRows] = await pool.query(
+      `SELECT s.id, s.name, s.nameSinhala, s.isrcCode, s.status, s.notes, s.conflict,
+              s.is_recordlabel, s.is_lyrics, s.is_musician, s.is_singer, s.updated_at
+       FROM songs s
+       WHERE s.id = ? AND (s.is_delete = 0 OR s.is_delete IS NULL)`,
+      [songId]
+    );
+
+    if (songRows.length === 0) {
+      return res.status(404).json({ message: 'Song not found' });
+    }
+    const song = songRows[0];
+
+    // 2. Fetch artist relations (singers, lyricists, musicians)
+    const [artRows] = await pool.query(
+      `SELECT ss.song_id, 'singer' AS role, a.name AS artist_name
+       FROM songSinger ss INNER JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id = ? AND (ss.is_delete = 0 OR ss.is_delete IS NULL)
+       UNION ALL
+       SELECT sl.song_id, 'lyricist' AS role, a.name AS artist_name
+       FROM songLyrics sl INNER JOIN artists a ON sl.artist_id = a.id WHERE sl.song_id = ? AND (sl.is_delete = 0 OR sl.is_delete IS NULL)
+       UNION ALL
+       SELECT sm.song_id, 'musician' AS role, a.name AS artist_name
+       FROM songmusician sm INNER JOIN artists a ON sm.artist_id = a.id WHERE sm.song_id = ? AND (sm.is_delete = 0 OR sm.is_delete IS NULL)`,
+      [songId, songId, songId]
+    );
+
+    const singers = artRows.filter(r => r.role === 'singer').map(r => r.artist_name);
+    const lyricists = artRows.filter(r => r.role === 'lyricist').map(r => r.artist_name);
+    const musicians = artRows.filter(r => r.role === 'musician').map(r => r.artist_name);
+
+    // 3. Fetch record labels for song (active and non-deleted only)
+    const [labelRows] = await pool.query(
+      `SELECT DISTINCT rl.id, COALESCE(rl.display_name, rl.name) AS label_name
+       FROM songalbum sa
+       INNER JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+       INNER JOIN record_label rl ON a.record_label_id = rl.id 
+         AND (rl.status = 1 OR rl.status = '1' OR rl.status IS NULL) 
+         AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+       WHERE sa.song_id = ? AND (sa.is_delete = 0 OR sa.is_delete IS NULL)`,
+      [songId]
+    );
+
+    const uniqueLabelNames = [...new Set(labelRows.map(l => l.label_name).filter(Boolean))];
+    const labelNames = uniqueLabelNames.length > 0 ? uniqueLabelNames.join(', ') : 'Ransilu';
+
+    // 4. Fetch revenue import history for this song (active records only)
+    const [historyRows] = await pool.query(
+      `SELECT id, song_id, isrc_code, date, amount, remain_revenue, created_at
+       FROM revenue
+       WHERE song_id = ? AND (status = 1 OR status IS NULL) AND (is_delete = 0 OR is_delete IS NULL)
+       ORDER BY id DESC`,
+      [songId]
+    );
+
+    // 5. Calculate metrics
+    let grossIncome = 0;
+    let totalEarning = 0;
+    let totalOutgoing = 0;
+    let minDate = null;
+    let maxDate = null;
+
+    historyRows.forEach(r => {
+      const amt = parseFloat(r.amount) || 0;
+      const rem = parseFloat(r.remain_revenue !== null && r.remain_revenue !== undefined ? r.remain_revenue : r.amount) || 0;
+      const out = amt - rem;
+
+      grossIncome += amt;
+      totalEarning += rem;
+      totalOutgoing += out;
+
+      const dStr = r.date ? String(r.date).slice(0, 10) : null;
+      if (dStr && dStr !== 'null' && dStr !== 'undefined') {
+        if (!minDate || dStr < minDate) minDate = dStr;
+        if (!maxDate || dStr > maxDate) maxDate = dStr;
+      }
+    });
+
+    const isRec = (song.is_recordlabel === 1 || song.is_recordlabel === true || song.is_recordlabel === '1');
+    const isLyr = (song.is_lyrics === 1 || song.is_lyrics === true || song.is_lyrics === '1');
+    const isMus = (song.is_musician === 1 || song.is_musician === true || song.is_musician === '1');
+
+    const labelPct = isRec ? 50 : 0;
+    const lyricsPct = isLyr ? 25 : 0;
+    const musicPct = isMus ? 25 : 0;
+    const ownershipPct = labelPct + lyricsPct + musicPct;
+    const outgoingPct = 100 - ownershipPct;
+
+    const labelShare = grossIncome * (labelPct / 100);
+    const lyricsShare = grossIncome * (lyricsPct / 100);
+    const musicShare = grossIncome * (musicPct / 100);
+
+    const lastUpdateDate = historyRows.length > 0 && historyRows[0].created_at
+      ? String(historyRows[0].created_at).slice(0, 10)
+      : (song.updated_at ? String(song.updated_at).slice(0, 10) : 'N/A');
+
+    res.json({
+      song: {
+        id: song.id,
+        name: toTitleCase(song.name),
+        nameSinhala: song.nameSinhala || song.name,
+        isrcCode: song.isrcCode || '—',
+        artist: singers.length > 0 ? singers.join(', ') : 'Singer',
+        lyrics: lyricists.length > 0 ? lyricists.join(', ') : '—',
+        music: musicians.length > 0 ? musicians.join(', ') : '—',
+        labelNames,
+        isRecordLabel: isRec,
+        isLyrics: isLyr,
+        isMusician: isMus
+      },
+      metrics: {
+        grossIncome,
+        totalEarning,
+        totalOutgoing,
+        ownershipPct,
+        outgoingPct,
+        labelPct,
+        lyricsPct,
+        musicPct,
+        labelShare,
+        lyricsShare,
+        musicShare,
+        minDate: minDate || 'N/A',
+        maxDate: maxDate || 'N/A',
+        lastUpdateDate
+      },
+      history: historyRows.map(h => ({
+        id: h.id,
+        date: h.date ? String(h.date).slice(0, 10) : (h.created_at ? String(h.created_at).slice(0, 10) : 'N/A'),
+        amount: parseFloat(h.amount) || 0,
+        remainRevenue: parseFloat(h.remain_revenue) || 0
+      }))
+    });
+  } catch (err) {
+    console.error('Error fetching song revenue details:', err);
+    res.status(500).json({ message: 'Failed to load song revenue details' });
+  }
+};
+
+// PUT /api/revenue/:id
+exports.updateRevenueRecord = async (req, res) => {
+  try {
+    const pool = getPool();
+    const id = parseInt(req.params.id, 10);
+    const newAmountParsed = parseFloat(req.body.amount);
+
+    if (isNaN(id) || isNaN(newAmountParsed) || newAmountParsed < 0) {
+      return res.status(400).json({ message: 'Invalid record ID or amount' });
+    }
+
+    // 1. Fetch revenue record
+    const [revRows] = await pool.query(
+      `SELECT id, song_id, isrc_code, date, amount, remain_revenue
+       FROM revenue
+       WHERE id = ? AND (is_delete = 0 OR is_delete IS NULL)`,
+      [id]
+    );
+
+    if (revRows.length === 0) {
+      return res.status(404).json({ message: 'Revenue record not found' });
+    }
+    const revRecord = revRows[0];
+
+    // 2. Fetch song flags to calculate remain_revenue
+    const [songRows] = await pool.query(
+      `SELECT id, is_recordlabel, is_lyrics, is_musician FROM songs WHERE id = ?`,
+      [revRecord.song_id]
+    );
+
+    let ownershipFraction = 1.0;
+    if (songRows.length > 0) {
+      const s = songRows[0];
+      const isRec = (s.is_recordlabel === 1 || s.is_recordlabel === true || s.is_recordlabel === '1') ? 50 : 0;
+      const isLyr = (s.is_lyrics === 1 || s.is_lyrics === true || s.is_lyrics === '1') ? 25 : 0;
+      const isMus = (s.is_musician === 1 || s.is_musician === true || s.is_musician === '1') ? 25 : 0;
+      ownershipFraction = (isRec + isLyr + isMus) / 100;
+    }
+
+    const newRemainRevenue = parseFloat((newAmountParsed * ownershipFraction).toFixed(2));
+
+    // 3. Update database
+    await pool.query(
+      `UPDATE revenue SET amount = ?, remain_revenue = ? WHERE id = ?`,
+      [newAmountParsed, newRemainRevenue, id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Revenue record updated successfully',
+      record: {
+        id,
+        amount: newAmountParsed,
+        remainRevenue: newRemainRevenue
+      }
+    });
+  } catch (err) {
+    console.error('Error updating revenue record:', err);
+    res.status(500).json({ message: 'Failed to update revenue record' });
+  }
+};
+
+// DELETE /api/revenue/:id
+exports.deleteRevenueRecord = async (req, res) => {
+  try {
+    const pool = getPool();
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      return res.status(400).json({ message: 'Invalid record ID' });
+    }
+
+    await pool.query(
+      `UPDATE revenue SET status = 0, is_delete = 1 WHERE id = ?`,
+      [id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Revenue record deleted successfully'
+    });
+  } catch (err) {
+    console.error('Error deleting revenue record:', err);
+    res.status(500).json({ message: 'Failed to delete revenue record' });
   }
 };

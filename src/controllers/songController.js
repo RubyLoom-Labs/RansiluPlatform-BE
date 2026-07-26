@@ -39,6 +39,45 @@ async function fetchSongConflictsMap(songIds, pool) {
   }
 }
 
+async function fetchSongNotesCasesMap(songs, pool) {
+  if (!Array.isArray(songs) || songs.length === 0) return {};
+  try {
+    const [ncRows] = await pool.query(
+      `SELECT id, type, name, link_type, link_result
+       FROM notesandcases
+       WHERE status = 1 AND is_delete = 0`
+    );
+
+    const map = {};
+    songs.forEach(song => {
+      const sIdStr = String(song.id);
+      const sName = (song.name || '').toLowerCase().trim();
+      const sSinhala = (song.nameSinhala || '').toLowerCase().trim();
+
+      const matchedItems = ncRows.filter(r => {
+        const linkVal = (r.link_result || '').toLowerCase().trim();
+        if (!linkVal) return false;
+        if (linkVal === sIdStr) return true;
+        if (sName && (linkVal.includes(sName) || linkVal === sName)) return true;
+        if (sSinhala && (linkVal.includes(sSinhala) || linkVal === sSinhala)) return true;
+        if (r.name && sName && r.name.toLowerCase().includes(sName)) return true;
+        return false;
+      });
+
+      if (matchedItems.length > 0) {
+        map[song.id] = matchedItems.map(m => `${m.type === 'case' ? 'Case' : 'Note'}: ${m.name}`).join('; ');
+      } else {
+        map[song.id] = song.notes && song.notes.trim() ? song.notes : 'No Cases Or Notes';
+      }
+    });
+
+    return map;
+  } catch (err) {
+    console.error('Error fetching song notes/cases map:', err);
+    return {};
+  }
+}
+
 function formatImage(pathStr, host) {
   if (!pathStr) return null;
   if (pathStr.startsWith('http://') || pathStr.startsWith('https://') || pathStr.startsWith('data:')) return pathStr;
@@ -282,6 +321,9 @@ exports.getSongs = async (req, res) => {
     // 3.4 Fetch active conflicts from SongConflict table
     const songConflictsMap = await fetchSongConflictsMap(songIds, pool);
 
+    // 3.5 Fetch active notes & cases from notesandcases table
+    const songNotesCasesMap = await fetchSongNotesCasesMap(songs, pool);
+
     // 4. Map songs to the shape expected by the frontend
     const formattedSongs = songs.map((song) => {
       const rels = songRelations[song.id] || { singers: [], lyricists: [], musicians: [] };
@@ -312,7 +354,7 @@ exports.getSongs = async (req, res) => {
         ownership: calculatedPct,
         ownershipPercentage: calculatedPct,
         ownershipPercentageText: `${calculatedPct}%`,
-        notes: song.notes || 'No Cases Or Notes',
+        notes: songNotesCasesMap[song.id] || song.notes || 'No Cases Or Notes',
         conflictCount: cCount,
         conflicts: conflictText,
         conflict: conflictText,

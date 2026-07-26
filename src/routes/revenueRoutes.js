@@ -6,6 +6,9 @@ const upload = require('../middlewares/upload');
 router.get('/', revenueController.getRevenueData);
 router.get('/template-export', revenueController.exportRevenueTemplate);
 router.get('/export', revenueController.exportRevenueData);
+router.get('/song/:id', revenueController.getSongRevenueDetails);
 router.post('/import', upload.single('file'), revenueController.importRevenueData);
+router.put('/:id', revenueController.updateRevenueRecord);
+router.delete('/:id', revenueController.deleteRevenueRecord);
 
 module.exports = router;

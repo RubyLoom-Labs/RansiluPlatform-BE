@@ -20,7 +20,7 @@ const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     if (file.fieldname === 'track') {
       cb(null, uploadDirs.audio);
-    } else if (file.fieldname === 'image' || file.fieldname === 'art' || file.fieldname === 'logo') {
+    } else if (file.fieldname === 'image' || file.fieldname === 'art' || file.fieldname === 'logo' || file.fieldname === 'profile_image') {
       cb(null, uploadDirs.images);
     } else {
       // Default to documents directory for any document/other uploads

@@ -1,4 +1,6 @@
+const bcrypt = require('bcryptjs');
 const { getPool } = require('../config/db');
+const { validatePasswordSecurity, isPasswordReused, recordPasswordHistory } = require('../utils/passwordHelper');
 
 // Helper to log user action
 async function createLog(userId, username, action, details = null, ipAddress = null) {
@@ -81,6 +83,12 @@ exports.createUser = async (req, res) => {
       return res.status(400).json({ message: 'Username is required.' });
     }
 
+    const plainPassword = password ? password.trim() : 'Password123!';
+    const securityCheck = validatePasswordSecurity(plainPassword);
+    if (!securityCheck.isValid) {
+      return res.status(400).json({ message: securityCheck.message });
+    }
+
     // Check duplicate username or email
     const [existing] = await pool.query(
       `SELECT id FROM users WHERE (username = ? OR email = ?) AND is_delete = 0`,
@@ -91,6 +99,7 @@ exports.createUser = async (req, res) => {
     }
 
     const roleId = user_role_id ? parseInt(user_role_id, 10) : null;
+    const hashedPassword = await bcrypt.hash(plainPassword, 10);
 
     const [result] = await pool.query(
       `INSERT INTO users (firstname, lastname, email, username, password, user_role_id, status, is_delete)
@@ -100,12 +109,13 @@ exports.createUser = async (req, res) => {
         lastname.trim(),
         email.trim().toLowerCase(),
         username.trim(),
-        password ? password.trim() : 'Password123!',
+        hashedPassword,
         roleId
       ]
     );
 
     const newUserId = result.insertId;
+    await recordPasswordHistory(newUserId, hashedPassword);
 
     await createLog(newUserId, username.trim(), 'CREATE_USER', `Created user ${firstname} ${lastname}`);
 
@@ -176,8 +186,20 @@ exports.updateUser = async (req, res) => {
     const updateParams = [firstname.trim(), lastname.trim(), email.trim().toLowerCase(), username.trim(), roleId, userStatus];
 
     if (password && password.trim()) {
+      const securityCheck = validatePasswordSecurity(password);
+      if (!securityCheck.isValid) {
+        return res.status(400).json({ message: securityCheck.message });
+      }
+
+      const reused = await isPasswordReused(id, password);
+      if (reused) {
+        return res.status(400).json({ message: 'You cannot reuse a previously used password. Please choose a new password.' });
+      }
+
+      const hashedPassword = await bcrypt.hash(password.trim(), 10);
+      await recordPasswordHistory(id, hashedPassword);
       updateQuery += `, password = ?`;
-      updateParams.push(password.trim());
+      updateParams.push(hashedPassword);
     }
 
     updateQuery += ` WHERE id = ? AND is_delete = 0`;

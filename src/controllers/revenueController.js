@@ -655,6 +655,28 @@ exports.importRevenueData = async (req, res) => {
       return String(v).trim();
     };
 
+    // Helper to normalize a date cell (Date object, Excel serial number, or string) to 'YYYY-MM-DD'.
+    // This guarantees the value fits VARCHAR(50) and sorts/compares correctly as an ISO date string.
+    const normalizeDateForStorage = (v) => {
+      if (v === null || v === undefined || v === '') return null;
+      let d;
+      if (v instanceof Date) {
+        d = v;
+      } else if (typeof v === 'number') {
+        // Excel serial date (days since 1899-12-30)
+        d = new Date(Math.round((v - 25569) * 86400 * 1000));
+      } else if (typeof v === 'object' && v.result !== undefined) {
+        return normalizeDateForStorage(v.result);
+      } else {
+        d = new Date(String(v).trim());
+      }
+      if (isNaN(d.getTime())) return null;
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
+
     worksheet.eachRow((row, rowNumber) => {
       if (rowNumber === 1) return; // Skip header row
 
@@ -667,7 +689,9 @@ exports.importRevenueData = async (req, res) => {
       const songId = parseInt(extractVal(songIdVal), 10);
       const isrcCode = extractVal(isrcCodeVal);
       const songName = extractVal(songNameVal);
-      const date = extractVal(dateVal);
+      // Use the date exactly as provided in the Excel file's date column, normalized to YYYY-MM-DD.
+      // Falls back to today's date only when the cell is empty/unparseable.
+      const date = normalizeDateForStorage(dateVal) || normalizeDateForStorage(new Date());
       const amountParsed = parseFloat(extractVal(amountVal));
       const amount = isNaN(amountParsed) ? 0 : amountParsed;
 
@@ -1386,7 +1410,7 @@ exports.getArtistRevenueDetails = async (req, res) => {
         metrics: {
           totalSongs: 0, distributedSongs: 0, undistributedSongs: 0,
           grossIncome: 0, totalEarning: 0, totalOutgoing: 0,
-          distributionPct: 30, artistAmount: 0, otherArtistAmount: 0, ourAmount: 0,
+          distributionPct: 30, artistAmount: 0, artistSongCount: 0, otherArtistAmount: 0, ourAmount: 0,
           distributorAmount: 0, distributorAmountFmt: '$0',
           latestPeriod: 'N/A', latestAmount: 0
         },
@@ -1501,9 +1525,7 @@ exports.getArtistRevenueDetails = async (req, res) => {
     };
 
     let grossIncome = 0;
-    let totalEarning = 0; // Our Amount (Ransilu)
-    let artistAmount = 0;
-    let otherArtistAmount = 0;
+    let totalEarning = 0;
     let totalDistributor = 0; // 30% distributor cut, sum of revenue.distributor_amount
 
     const songRevSum = {};
@@ -1512,7 +1534,6 @@ exports.getArtistRevenueDetails = async (req, res) => {
       const amt = parseFloat(r.amount) || 0;
       const remain = parseFloat(r.remain_revenue);
       const earn = !isNaN(remain) ? remain : amt;
-      const out = amt - earn;
       const distAmt = r.distributor_amount !== null && r.distributor_amount !== undefined
         ? parseFloat(r.distributor_amount)
         : amt * 0.30;
@@ -1521,42 +1542,150 @@ exports.getArtistRevenueDetails = async (req, res) => {
       totalEarning += earn;
       totalDistributor += distAmt;
 
-      const { thisShare, otherShare } = computeArtistShare(r.song_id, artistId, out);
-
-      artistAmount += thisShare;
-      otherArtistAmount += otherShare;
-
-      if (!songRevSum[r.song_id]) songRevSum[r.song_id] = { income: 0, earning: 0 };
+      if (!songRevSum[r.song_id]) songRevSum[r.song_id] = { income: 0, earning: 0, distributor: 0 };
       songRevSum[r.song_id].income += amt;
       songRevSum[r.song_id].earning += earn;
+      songRevSum[r.song_id].distributor += distAmt;
+    });
+
+    // Song count = all unique songs associated with this artist (singer + lyrics + musician tables)
+    const artistSongCount = songRows.length;
+
+    // Three-way split: Artist Amount + Other Artist Amount + Our Amount = Net Revenue per song.
+    //
+    // Artist Amount    – shares going to the SELECTED artist (lyrics/musician role, flag = 0)
+    // Other Artist Amt – external shares going to OTHER artists (flag = 0, excl. selected artist)
+    // Our Amount       – shares owned by us (flag = 1)
+    //
+    // Identity: artistAmount + otherArtistAmount + ourAmount === netRevenue (per song)
+    let artistAmount = 0;
+    let otherArtistAmount = 0;
+    let ourAmount = 0;
+
+    songRows.forEach(song => {
+      const sId = song.id;
+      const roles = songRoleMap[sId] || { singers: [], lyricists: [], musicians: [] };
+
+      // Determine if selected artist is main lyrics artist (explicit is_main=1 takes priority, else all)
+      const lyrMains = roles.lyricists.filter(r => r.is_main === 1);
+      const lyrActive = lyrMains.length > 0 ? lyrMains : roles.lyricists;
+      const isMainLyricsArtist = lyrActive.some(r => String(r.artist_id) === String(artistId));
+
+      // Determine if selected artist is main musician artist
+      const musMains = roles.musicians.filter(r => r.is_main === 1);
+      const musActive = musMains.length > 0 ? musMains : roles.musicians;
+      const isMainMusicianArtist = musActive.some(r => String(r.artist_id) === String(artistId));
+
+      const revData = songRevSum[sId] || { income: 0 };
+      // Net Revenue = 70% of gross income (after the fixed 30% distributor cut).
+      // Using income * 0.70 (not income - stored_distributor_amount) ensures the
+      // displayed cards always satisfy: Gross = Distributor(30%) + Artist + Other + Our.
+      const netRevenue = revData.income * 0.70;
+
+      const isRec = (song.is_recordlabel === 1 || song.is_recordlabel === true || song.is_recordlabel === '1');
+      const isLyr = (song.is_lyrics === 1 || song.is_lyrics === true || song.is_lyrics === '1');
+      const isMus = (song.is_musician === 1 || song.is_musician === true || song.is_musician === '1');
+
+      // --- Artist Amount: selected artist's direct share ---
+      // Singer role contributes no direct percentage.
+      if (isMainLyricsArtist && !isLyr) artistAmount += 0.25 * netRevenue;
+      if (isMainMusicianArtist && !isMus) artistAmount += 0.25 * netRevenue;
+
+      // --- Other Artist Amount: external shares NOT belonging to the selected artist ---
+      // Record label share is always "other" (never the selected artist's share).
+      if (!isRec) otherArtistAmount += 0.5 * netRevenue;
+      // Lyrics share is "other" only when the selected artist is NOT the main lyrics artist.
+      if (!isLyr && !isMainLyricsArtist) otherArtistAmount += 0.25 * netRevenue;
+      // Musician share is "other" only when the selected artist is NOT the main musician artist.
+      if (!isMus && !isMainMusicianArtist) otherArtistAmount += 0.25 * netRevenue;
+
+      // --- Our Amount: shares owned by us (flag = 1) ---
+      if (isRec) ourAmount += 0.5 * netRevenue;
+      if (isLyr) ourAmount += 0.25 * netRevenue;
+      if (isMus) ourAmount += 0.25 * netRevenue;
     });
 
     const totalOutgoing = grossIncome - totalEarning;
     const distributionPct = 30; // Fixed distributor share rate
 
-    // 7. Latest period amount
+    // 7. Get latest paid period to filter unpaid revenues
+    const [latestPayment] = await pool.query(
+      `SELECT period_label FROM artist_payments
+       WHERE artist_id = ? AND status = 1 AND is_delete = 0
+       ORDER BY paid_at DESC LIMIT 1`,
+      [artistId]
+    );
+    const latestPaidDate = latestPayment.length > 0 ? latestPayment[0].period_label : null;
+
+    // Filter to only UNPAID revenues (those after the latest paid period)
+    const unpaidRevRows = latestPaidDate
+      ? revRows.filter(r => String(r.date).slice(0, 10) > latestPaidDate)
+      : revRows;
+
+    // Latest period amount (from unpaid revenues only)
     let latestPeriod = 'N/A';
+    let latestRevenueDate = 'N/A';
     let latestAmount = 0;
-    if (revRows.length > 0) {
-      const latestDateStr = revRows[0].date ? String(revRows[0].date).slice(0, 10) : '';
+    let latestPaid = false;
+    let latestSongCountFinal = 0;
+    let hasUnpaidRevenue = false;
+    
+    if (unpaidRevRows.length > 0) {
+      const latestDateStr = unpaidRevRows[0].date ? String(unpaidRevRows[0].date).slice(0, 10) : '';
       if (latestDateStr) {
-        const latestD = new Date(latestDateStr);
+        // Format: YYYY-MM-DD. Use local date components (not toISOString) to avoid
+        // UTC timezone shifts rolling the date back by one day.
+        const latestD = new Date(latestDateStr + 'T00:00:00');
         const prevMonth = new Date(latestD);
         prevMonth.setMonth(prevMonth.getMonth() - 1);
-        const fmtD = (d) => d.toISOString().slice(0, 10).replace(/-/g, '.');
+        const fmtD = (d) => {
+          const y = d.getFullYear();
+          const m = String(d.getMonth() + 1).padStart(2, '0');
+          const day = String(d.getDate()).padStart(2, '0');
+          return `${y}-${m}-${day}`;
+        };
         latestPeriod = `${fmtD(prevMonth)} to ${fmtD(latestD)}`;
+        latestRevenueDate = latestDateStr;  // Store the latest date for mark-as-paid
       }
 
-      // Sum latest batch amount
-      const latestBatchDate = revRows[0].date;
-      revRows.filter(r => String(r.date) === String(latestBatchDate)).forEach(r => {
+      // Compute latest batch artist share using ownership-flag logic (consistent with main cards)
+      const latestBatchDate = unpaidRevRows[0].date;
+      const latestBatchSongRevSum = {};
+      unpaidRevRows.filter(r => String(r.date) === String(latestBatchDate)).forEach(r => {
         const amt = parseFloat(r.amount) || 0;
-        const remain = parseFloat(r.remain_revenue);
-        const earn = !isNaN(remain) ? remain : amt;
-        const out = amt - earn;
-        const { thisShare } = computeArtistShare(r.song_id, artistId, out);
-        latestAmount += thisShare;
+        if (!latestBatchSongRevSum[r.song_id]) latestBatchSongRevSum[r.song_id] = 0;
+        latestBatchSongRevSum[r.song_id] += amt;
       });
+
+      let latestSongCount = 0;
+      Object.keys(latestBatchSongRevSum).forEach(sIdStr => {
+        const sId = parseInt(sIdStr, 10);
+        const song = songRows.find(s => s.id === sId);
+        if (!song) return;
+        const roles = songRoleMap[sId] || { singers: [], lyricists: [], musicians: [] };
+        const lyrMains = roles.lyricists.filter(r => r.is_main === 1);
+        const lyrActive = lyrMains.length > 0 ? lyrMains : roles.lyricists;
+        const isMainLyricsArtist = lyrActive.some(r => String(r.artist_id) === String(artistId));
+        const musMains = roles.musicians.filter(r => r.is_main === 1);
+        const musActive = musMains.length > 0 ? musMains : roles.musicians;
+        const isMainMusicianArtist = musActive.some(r => String(r.artist_id) === String(artistId));
+        const net = latestBatchSongRevSum[sId] * 0.70;
+        const isLyr = (song.is_lyrics === 1 || song.is_lyrics === true || song.is_lyrics === '1');
+        const isMus = (song.is_musician === 1 || song.is_musician === true || song.is_musician === '1');
+        let share = 0;
+        if (isMainLyricsArtist && !isLyr) share += 0.25 * net;
+        if (isMainMusicianArtist && !isMus) share += 0.25 * net;
+        if (share > 0) {
+          latestAmount += share;
+          latestSongCount++;
+        }
+      });
+
+      if (latestAmount > 0) {
+        latestPaid = false;  // Unpaid revenues by definition
+        latestSongCountFinal = latestSongCount;
+        hasUnpaidRevenue = true;
+      }
     }
 
     const fmtUSD = (v) => `$${(parseFloat(v) || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
@@ -1582,28 +1711,26 @@ exports.getArtistRevenueDetails = async (req, res) => {
       };
     });
 
-    // 9. History items formatted like mockup: 2026.02.13 Amount $100 -60 Songs
-    const historyMap = {};
-    revRows.forEach(r => {
-      const dateKey = r.date ? String(r.date).slice(0, 10).replace(/-/g, '.') : 'N/A';
-      if (!historyMap[dateKey]) {
-        historyMap[dateKey] = { date: dateKey, amount: 0, songIds: new Set() };
-      }
-      const amt = parseFloat(r.amount) || 0;
-      const remain = parseFloat(r.remain_revenue);
-      const earn = !isNaN(remain) ? remain : amt;
-      const out = amt - earn;
-      const { thisShare } = computeArtistShare(r.song_id, artistId, out);
-      historyMap[dateKey].amount += thisShare;
-      historyMap[dateKey].songIds.add(r.song_id);
-    });
+    // 9. Payment history — log of Mark as Paid events for this artist
+    const [paymentRows] = await pool.query(
+      `SELECT id, amount, songs_count, period_label, paid_at
+       FROM artist_payments
+       WHERE artist_id = ? AND status = 1 AND is_delete = 0
+       ORDER BY paid_at DESC`,
+      [artistId]
+    );
 
-    const history = Object.values(historyMap).map(h => ({
-      date: h.date,
-      amount: Math.round(h.amount),
-      amountFmt: `$${Math.round(h.amount)}`,
-      songsCount: h.songIds.size
-    }));
+    const history = paymentRows.map(p => {
+      const d = new Date(p.paid_at);
+      const dateLabel = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: '2-digit' });
+      return {
+        date: dateLabel,
+        periodLabel: p.period_label || '',
+        amount: parseFloat(p.amount) || 0,
+        amountFmt: `$${Math.round(parseFloat(p.amount) || 0)}`,
+        songsCount: p.songs_count || 0
+      };
+    });
 
     res.json({
       artist: { id: artist.id, name: toTitleCase(artist.name), image_url: formattedImg, types },
@@ -1616,18 +1743,24 @@ exports.getArtistRevenueDetails = async (req, res) => {
         totalOutgoing: Math.round(totalOutgoing),
         distributionPct,
         artistAmount: Math.round(artistAmount),
+        artistSongCount,
         otherArtistAmount: Math.round(otherArtistAmount),
-        ourAmount: Math.round(totalEarning),
-        distributorAmount: Math.round(totalDistributor),
+        ourAmount: Math.round(ourAmount),
+        distributorAmount: Math.round(grossIncome * 0.30),
         latestPeriod,
         latestAmount: Math.round(latestAmount),
+        latestSongCount: latestSongCountFinal,
+        latestPaid,
+        hasUnpaidRevenue,
+        latestRevenueDate,
         grossIncomeFmt: `$${Math.round(grossIncome)}`,
         totalEarningFmt: `$${Math.round(totalEarning)}`,
         totalOutgoingFmt: `$${Math.round(totalOutgoing)}`,
         artistAmountFmt: `$${Math.round(artistAmount)}`,
+        artistSongCountFmt: artistSongCount,
         otherArtistAmountFmt: `$${Math.round(otherArtistAmount)}`,
-        ourAmountFmt: `$${Math.round(totalEarning)}`,
-        distributorAmountFmt: `$${Math.round(totalDistributor)}`,
+        ourAmountFmt: `$${Math.round(ourAmount)}`,
+        distributorAmountFmt: `$${Math.round(grossIncome * 0.30)}`,
         latestAmountFmt: `$${Math.round(latestAmount)}`
       },
       ownershipCards,
@@ -1637,5 +1770,153 @@ exports.getArtistRevenueDetails = async (req, res) => {
   } catch (err) {
     console.error('Error fetching artist revenue details:', err);
     res.status(500).json({ message: 'Failed to load artist revenue details' });
+  }
+};
+
+// POST /api/revenue/artist/:id/mark-paid
+exports.markArtistAsPaid = async (req, res) => {
+  try {
+    const pool = getPool();
+    const artistId = parseInt(req.params.id, 10);
+    if (isNaN(artistId)) {
+      return res.status(400).json({ message: 'Invalid artist ID' });
+    }
+
+    const { amount, songsCount, periodLabel } = req.body;
+    const payAmount = parseFloat(amount) || 0;
+    const paySongsCount = parseInt(songsCount, 10) || 0;
+    const payPeriodLabel = periodLabel || null;
+
+    if (payAmount <= 0) {
+      return res.status(400).json({ message: 'Amount must be greater than zero' });
+    }
+
+    // Guard: prevent duplicate payment for the same period
+    if (payPeriodLabel) {
+      const [existing] = await pool.query(
+        `SELECT id FROM artist_payments WHERE artist_id = ? AND period_label = ? AND status = 1 AND is_delete = 0 LIMIT 1`,
+        [artistId, payPeriodLabel]
+      );
+      if (existing.length > 0) {
+        return res.status(409).json({ message: 'This period has already been marked as paid' });
+      }
+    }
+
+    await pool.query(
+      `INSERT INTO artist_payments (artist_id, amount, songs_count, period_label) VALUES (?, ?, ?, ?)`,
+      [artistId, payAmount, paySongsCount, payPeriodLabel]
+    );
+
+    res.json({
+      success: true,
+      message: 'Artist payment recorded successfully'
+    });
+  } catch (err) {
+    console.error('Error marking artist as paid:', err);
+    res.status(500).json({ message: 'Failed to record artist payment' });
+  }
+};
+
+exports.getArtistSongs = async (req, res) => {
+  try {
+    const pool = getPool();
+    const artistId = parseInt(req.params.id, 10);
+    if (isNaN(artistId)) {
+      return res.status(400).json({ message: 'Invalid artist ID' });
+    }
+
+    // 1. Distinct active songs where this artist is the main artist (singer, lyrics, or musician)
+    const [songRows] = await pool.query(`
+      SELECT DISTINCT s.id, s.name, s.nameSinhala, s.isrcCode,
+             s.is_recordlabel, s.is_lyrics, s.is_musician
+      FROM songs s
+      WHERE s.status = 1 AND s.is_delete = 0
+        AND s.id IN (
+          SELECT song_id FROM songSinger WHERE artist_id = ? AND status=1 AND is_delete=0 AND (is_main = 1 OR is_main IS NULL)
+          UNION
+          SELECT song_id FROM songLyrics WHERE artist_id = ? AND status=1 AND is_delete=0 AND (is_main = 1 OR is_main IS NULL)
+          UNION
+          SELECT song_id FROM songmusician WHERE artist_id = ? AND status=1 AND is_delete=0 AND (is_main = 1 OR is_main IS NULL)
+        )
+      ORDER BY s.id DESC
+    `, [artistId, artistId, artistId]);
+
+    if (songRows.length === 0) {
+      return res.json({ songs: [], totalSongs: 0 });
+    }
+
+    const songIds = songRows.map(s => s.id);
+
+    // 2. Revenue sums per song (Income, Distributor 30%, Earning, Outgoing) — same as getRevenueData
+    const [revenueSumRows] = await pool.query(`
+      SELECT r.song_id,
+             SUM(r.amount) AS total_income,
+             SUM(COALESCE(r.distributor_amount, r.amount * 0.30)) AS total_distributor,
+             SUM(COALESCE(r.remain_revenue, (r.amount * 0.70))) AS total_earning,
+             SUM(r.amount - COALESCE(r.distributor_amount, r.amount * 0.30) - COALESCE(r.remain_revenue, (r.amount * 0.70))) AS total_outgoing
+      FROM revenue r
+      WHERE r.song_id IN (?) AND r.status = 1 AND r.is_delete = 0
+      GROUP BY r.song_id
+    `, [songIds]);
+
+    // 3. Singer relations for these songs (to build "Artist" / "Artist Sub" columns)
+    const [artistRelations] = await pool.query(`
+      SELECT ss.song_id, a.name AS artist_name
+      FROM songSinger ss
+      INNER JOIN artists a ON ss.artist_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+      WHERE ss.song_id IN (?) AND ss.status = 1 AND ss.is_delete = 0
+    `, [songIds]);
+
+    const revenueSumMap = {};
+    revenueSumRows.forEach(r => {
+      revenueSumMap[r.song_id] = {
+        income: parseFloat(r.total_income) || 0,
+        distributor: parseFloat(r.total_distributor) || 0,
+        earning: parseFloat(r.total_earning) || 0,
+        outgoing: parseFloat(r.total_outgoing) || 0
+      };
+    });
+
+    const songSingersMap = {};
+    artistRelations.forEach(rel => {
+      if (!songSingersMap[rel.song_id]) songSingersMap[rel.song_id] = [];
+      songSingersMap[rel.song_id].push(rel.artist_name);
+    });
+
+    const fmtDollar = (val) => val > 0 ? `$${val.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : '$0.00';
+
+    const formattedSongs = songRows.map(song => {
+      const revStats = revenueSumMap[song.id] || { income: 0, distributor: 0, earning: 0, outgoing: 0 };
+      const singers = songSingersMap[song.id] || [];
+
+      const isRec = (song.is_recordlabel === 1 || song.is_recordlabel === true || song.is_recordlabel === '1') ? 50 : 0;
+      const isLyr = (song.is_lyrics === 1 || song.is_lyrics === true || song.is_lyrics === '1') ? 25 : 0;
+      const isMus = (song.is_musician === 1 || song.is_musician === true || song.is_musician === '1') ? 25 : 0;
+      const ownershipRaw = isRec + isLyr + isMus;
+
+      return {
+        id: song.id,
+        name: toTitleCase(song.name),
+        nameSinhala: song.nameSinhala || song.name,
+        isrcCode: song.isrcCode || '—',
+        income: fmtDollar(revStats.income),
+        distributor: fmtDollar(revStats.distributor),
+        earning: fmtDollar(revStats.earning),
+        outgoing: fmtDollar(revStats.outgoing),
+        totalRevenue: fmtDollar(revStats.income),
+        revenueAmount: revStats.income,
+        artist: singers.length > 0 ? singers.join(', ') : '—',
+        artistSub: singers.length > 1 ? singers.slice(1).join(', ') : '',
+        ownership: ownershipRaw
+      };
+    });
+
+    res.json({
+      songs: formattedSongs,
+      totalSongs: formattedSongs.length
+    });
+  } catch (err) {
+    console.error('Error fetching artist songs:', err);
+    res.status(500).json({ message: 'Failed to fetch artist songs' });
   }
 };

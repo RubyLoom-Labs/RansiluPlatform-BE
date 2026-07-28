@@ -225,7 +225,7 @@ exports.inactivateRingtone = async (req, res) => {
               '—' as album
        FROM songringintone sr
        JOIN songs s ON sr.song_id = s.id
-       WHERE sr.ringintone_id = ? AND sr.status = 1 AND sr.is_deleted = 0 AND s.status = 1`,
+       WHERE sr.ringintone_id = ? AND sr.status = 1 AND sr.is_deleted = 0 AND s.status = 1 AND s.is_delete = 0`,
       [id]
     );
 
@@ -272,8 +272,14 @@ exports.activateRingtone = async (req, res) => {
 
     // Set ringtone status = 1
     await pool.query('UPDATE ringintone SET status = 1 WHERE id = ? AND is_deleted = 0', [id]);
-    // Restore all related non-deleted songringintone mappings to active
-    await pool.query('UPDATE songringintone SET status = 1 WHERE ringintone_id = ? AND is_deleted = 0', [id]);
+    // Restore only related song mappings for songs that are active and not soft-deleted
+    await pool.query(
+      `UPDATE songringintone sr
+       JOIN songs s ON sr.song_id = s.id
+       SET sr.status = 1
+       WHERE sr.ringintone_id = ? AND sr.is_deleted = 0 AND s.status = 1 AND s.is_delete = 0`,
+      [id]
+    );
 
     res.json({
       success: true

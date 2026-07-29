@@ -1,4 +1,5 @@
 const { getPool } = require('../config/db');
+const { createAuditLog } = require('../utils/auditLogger');
 
 // Helper to reliably format date values into YYYY-MM-DD strings
 function formatYMD(d) {
@@ -151,6 +152,12 @@ exports.createEvent = async (req, res) => {
       [result.insertId]
     );
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'CREATE_CALENDAR_EVENT',
+      details: `Created calendar event ${event_name.trim()}`
+    });
+
     res.status(201).json({
       message: 'Event created successfully.',
       event: newRows[0]
@@ -198,6 +205,12 @@ exports.updateEvent = async (req, res) => {
       [id]
     );
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'UPDATE_CALENDAR_EVENT',
+      details: `Updated calendar event ${event_name.trim()}`
+    });
+
     res.json({
       message: 'Event updated successfully.',
       event: updatedRows[0]
@@ -219,6 +232,12 @@ exports.deleteEvent = async (req, res) => {
     }
 
     await pool.query('UPDATE calendar_event SET is_delete = 1 WHERE id = ?', [id]);
+    await createAuditLog({
+      user: req.user || null,
+      action: 'DELETE_CALENDAR_EVENT',
+      details: `Deleted calendar event ID ${id}`
+    });
+
     res.json({ message: 'Event deleted successfully.' });
   } catch (error) {
     console.error('Error deleting calendar event:', error);

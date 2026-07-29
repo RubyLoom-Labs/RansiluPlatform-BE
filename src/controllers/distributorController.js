@@ -1,4 +1,5 @@
 const { getPool } = require('../config/db');
+const { createAuditLog } = require('../utils/auditLogger');
 
 // Helper to convert string to Title Case (capitalizing the first letter of each word)
 function toTitleCase(str) {

@@ -1,6 +1,7 @@
 const { getPool } = require('../config/db');
 const fs = require('fs');
 const path = require('path');
+const { createAuditLog } = require('../utils/auditLogger');
 
 // Helper to convert artist name to simple English letters (lowercase, a-z, and single spaces only)
 function toSimpleName(str) {
@@ -244,6 +245,12 @@ exports.createArtist = async (req, res) => {
     if (band) responseTypes.push('band');
     if (other) responseTypes.push('other');
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'CREATE_ARTIST',
+      details: `Created artist ${simpleName}`
+    });
+
     res.status(201).json({
       id: newArtistId,
       name: simpleName,
@@ -383,6 +390,12 @@ exports.updateArtist = async (req, res) => {
     if (updatedArtist.other) responseTypes.push('other');
 
     const host = `${req.protocol}://${req.get('host')}`;
+
+    await createAuditLog({
+      user: req.user || null,
+      action: 'UPDATE_ARTIST',
+      details: `Updated artist ${simpleName}`
+    });
 
     res.json({
       id: updatedArtist.id,
@@ -825,6 +838,12 @@ exports.deleteArtist = async (req, res) => {
       'UPDATE artists SET is_delete = 1, status = 0 WHERE id = ?',
       [artistId]
     );
+
+    await createAuditLog({
+      user: req.user || null,
+      action: 'DELETE_ARTIST',
+      details: `Deleted artist ID ${artistId}`
+    });
 
     res.json({ message: 'Artist deleted successfully' });
   } catch (error) {

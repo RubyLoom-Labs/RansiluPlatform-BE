@@ -1,4 +1,5 @@
 const { getPool } = require('../config/db');
+const { createAuditLog } = require('../utils/auditLogger');
 
 // Helper to convert string to Title Case
 function toTitleCase(str) {
@@ -138,6 +139,12 @@ exports.createRingtone = async (req, res) => {
 
     const host = `${req.protocol}://${req.get('host')}`;
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'CREATE_RINGTONE',
+      details: `Created ringtone ${lowercaseName}`
+    });
+
     res.status(201).json({
       id: result.insertId,
       name: toTitleCase(lowercaseName),
@@ -193,6 +200,12 @@ exports.updateRingtone = async (req, res) => {
     );
 
     const host = `${req.protocol}://${req.get('host')}`;
+
+    await createAuditLog({
+      user: req.user || null,
+      action: 'UPDATE_RINGTONE',
+      details: `Updated ringtone ${lowercaseName}`
+    });
 
     res.json({
       id: parseInt(id, 10),

@@ -1,4 +1,5 @@
 const { getPool } = require('../config/db');
+const { createAuditLog } = require('../utils/auditLogger');
 
 function getSriLankaTimestamp() {
   const now = new Date();
@@ -619,6 +620,12 @@ exports.createSong = async (req, res) => {
     // Backward compat: first ringtone entry as flat fields
     const firstRing = savedRingtones.length > 0 ? savedRingtones[0] : null;
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'CREATE_SONG',
+      details: `Created song ${lowercaseName}`
+    });
+
     res.status(201).json({
       id: songId,
       name: toTitleCase(lowercaseName),
@@ -1078,6 +1085,12 @@ exports.updateSong = async (req, res) => {
 
     // Backward compat: first ringtone entry as flat fields
     const firstRing = savedRingtones.length > 0 ? savedRingtones[0] : null;
+
+    await createAuditLog({
+      user: req.user || null,
+      action: 'UPDATE_SONG',
+      details: `Updated song ${name}`
+    });
 
     res.json({
       id: songId,
@@ -2370,6 +2383,12 @@ exports.deleteSong = async (req, res) => {
     await safeUpdate('UPDATE songmusician SET status = 0, is_delete = 1 WHERE song_id = ?', [songId]);
     await safeUpdate('UPDATE songringintone SET status = 0, is_deleted = 1, is_delete = 1 WHERE song_id = ?', [songId]);
     await safeUpdate('UPDATE songSinger SET status = 0, is_delete = 1 WHERE song_id = ?', [songId]);
+
+    await createAuditLog({
+      user: req.user || null,
+      action: 'DELETE_SONG',
+      details: `Deleted song ID ${songId}`
+    });
 
     res.json({ success: true, message: 'Song deleted successfully' });
   } catch (error) {

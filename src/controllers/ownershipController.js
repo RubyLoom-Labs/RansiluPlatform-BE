@@ -1,4 +1,5 @@
 const { getPool } = require('../config/db');
+const { createAuditLog } = require('../utils/auditLogger');
 
 function toTitleCase(str) {
   if (!str) return '';
@@ -706,6 +707,12 @@ exports.createOwnership = async (req, res) => {
     // Synchronize affected songs in songs table
     await syncSongOwnership(pool, songsList.map(s => s.song_id));
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'CREATE_OWNERSHIP',
+      details: `Created ownership document ${docName}`
+    });
+
     res.status(201).json({
       message: 'Ownership document created successfully',
       id: ownershipId
@@ -785,6 +792,12 @@ exports.addSongsToOwnership = async (req, res) => {
 
     // Synchronize affected songs in songs table
     await syncSongOwnership(pool, songsList.map(s => s.song_id));
+
+    await createAuditLog({
+      user: req.user || null,
+      action: 'UPDATE_OWNERSHIP',
+      details: `Added songs to ownership document ${id}`
+    });
 
     res.json({ message: 'Songs added to ownership document successfully' });
   } catch (error) {
@@ -894,6 +907,12 @@ exports.updateOwnership = async (req, res) => {
       await syncSongOwnership(pool, allAffectedSongIds);
     }
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'UPDATE_OWNERSHIP',
+      details: `Updated ownership document ${docName}`
+    });
+
     res.json({ message: 'Ownership document updated successfully' });
   } catch (error) {
     console.error('Error updating ownership document:', error);
@@ -931,6 +950,12 @@ exports.deleteOwnership = async (req, res) => {
     // Synchronize songs table
     await syncSongOwnership(pool, songIdsToSync);
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'DELETE_OWNERSHIP',
+      details: `Deleted ownership document ID ${id}`
+    });
+
     res.json({ success: true, message: 'Ownership document deleted successfully', id });
   } catch (error) {
     console.error('Error deleting ownership document:', error);
@@ -956,6 +981,12 @@ exports.removeSongFromOwnership = async (req, res) => {
 
     // Synchronize songs table boolean flags for this song
     await syncSongOwnership(pool, [songId]);
+
+    await createAuditLog({
+      user: req.user || null,
+      action: 'REMOVE_OWNERSHIP_SONG',
+      details: `Removed song ${songId} from ownership document ${id}`
+    });
 
     res.json({ success: true, message: 'Song removed from ownership document successfully' });
   } catch (error) {

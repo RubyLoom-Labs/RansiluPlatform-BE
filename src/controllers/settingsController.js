@@ -1,17 +1,16 @@
 const bcrypt = require('bcryptjs');
 const { getPool } = require('../config/db');
 const { validatePasswordSecurity, isPasswordReused, recordPasswordHistory } = require('../utils/passwordHelper');
+const { createAuditLog } = require('../utils/auditLogger');
 
-// Helper to log user action
-async function createLog(userId, username, action, details = null, ipAddress = null) {
+async function createLog(userId, userOrIdentifier, action, details = null, ipAddress = null) {
   try {
-    const pool = getPool();
-    await pool.query(
-      `INSERT INTO user_logs (user_id, username, action, details, ip_address) VALUES (?, ?, ?, ?, ?)`,
-      [userId || null, username || 'System', action, details, ipAddress || '127.0.0.1']
-    );
+    const user = userOrIdentifier && typeof userOrIdentifier === 'object'
+      ? { ...userOrIdentifier, id: userOrIdentifier.id ?? userId ?? null }
+      : { id: userId || null, email: userOrIdentifier || 'System', username: userOrIdentifier || 'System' };
+    await createAuditLog({ user, action, details, ipAddress });
   } catch (err) {
-    console.error('Error logging user activity:', err);
+    console.error('Error logging settings action:', err);
   }
 }
 
@@ -117,7 +116,7 @@ exports.createUser = async (req, res) => {
     const newUserId = result.insertId;
     await recordPasswordHistory(newUserId, hashedPassword);
 
-    await createLog(newUserId, username.trim(), 'CREATE_USER', `Created user ${firstname} ${lastname}`);
+    await createLog(newUserId, req.user || { id: null, email: email.trim(), username: username.trim() }, 'CREATE_USER', `Created user ${firstname} ${lastname}`);
 
     const [userRows] = await pool.query(
       `SELECT u.id, u.firstname, u.lastname, u.email, u.username, u.user_role_id, u.status, u.is_delete, u.created_at,
@@ -207,7 +206,7 @@ exports.updateUser = async (req, res) => {
 
     await pool.query(updateQuery, updateParams);
 
-    await createLog(id, username.trim(), 'UPDATE_USER', `Updated user ${firstname} ${lastname}`);
+    await createLog(id, req.user || { id: null, email: email.trim(), username: username.trim() }, 'UPDATE_USER', `Updated user ${firstname} ${lastname}`);
 
     const [userRows] = await pool.query(
       `SELECT u.id, u.firstname, u.lastname, u.email, u.username, u.user_role_id, u.status, u.is_delete, u.created_at,
@@ -242,7 +241,7 @@ exports.deleteUser = async (req, res) => {
 
     await pool.query(`UPDATE users SET is_delete = 1 WHERE id = ?`, [id]);
 
-    await createLog(id, username, 'DELETE_USER', `Soft deleted user ID ${id} (${username})`);
+    await createLog(id, req.user || { id: null, email: email || username, username: username || email }, 'DELETE_USER', `Soft deleted user ID ${id} (${username})`);
 
     res.json({ message: 'User deleted successfully.' });
   } catch (error) {
@@ -349,7 +348,7 @@ exports.createRole = async (req, res) => {
       }
     }
 
-    await createLog(null, 'Admin', 'CREATE_ROLE', `Created role ${role_name.trim()}`);
+    await createLog(null, req.user || { id: null, email: 'Admin', username: 'Admin' }, 'CREATE_ROLE', `Created role ${role_name.trim()}`);
 
     res.status(201).json({
       message: 'User Role created successfully.',
@@ -409,7 +408,7 @@ exports.updateRole = async (req, res) => {
       }
     }
 
-    await createLog(null, 'Admin', 'UPDATE_ROLE', `Updated role ${role_name.trim()}`);
+    await createLog(null, req.user || { id: null, email: 'Admin', username: 'Admin' }, 'UPDATE_ROLE', `Updated role ${role_name.trim()}`);
 
     res.json({
       message: 'User Role updated successfully.'
@@ -430,7 +429,7 @@ exports.deleteRole = async (req, res) => {
     }
 
     await pool.query(`UPDATE user_roles SET is_delete = 1 WHERE id = ?`, [id]);
-    await createLog(null, 'Admin', 'DELETE_ROLE', `Soft deleted role ID ${id}`);
+    await createLog(null, req.user || { id: null, email: 'Admin', username: 'Admin' }, 'DELETE_ROLE', `Soft deleted role ID ${id}`);
 
     res.json({ message: 'User Role deleted successfully.' });
   } catch (error) {

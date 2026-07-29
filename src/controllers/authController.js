@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const { getPool } = require('../config/db');
 const { JWT_SECRET } = require('../middlewares/authMiddleware');
 const { validatePasswordSecurity, isPasswordReused, recordPasswordHistory } = require('../utils/passwordHelper');
+const { createAuditLog } = require('../utils/auditLogger');
 
 const REFRESH_SECRET = process.env.REFRESH_SECRET || 'ransilu_platform_refresh_secret_key_2026';
 
@@ -25,13 +26,12 @@ const COOKIE_OPTIONS_REFRESH = {
 };
 
 // Helper to create audit logs
-async function createLog(userId, username, action, details = null, ipAddress = null) {
+async function createLog(userId, userOrIdentifier, action, details = null, ipAddress = null) {
   try {
-    const pool = getPool();
-    await pool.query(
-      `INSERT INTO user_logs (user_id, username, action, details, ip_address) VALUES (?, ?, ?, ?, ?)`,
-      [userId || null, username || 'System', action, details, ipAddress || '127.0.0.1']
-    );
+    const user = userOrIdentifier && typeof userOrIdentifier === 'object'
+      ? { ...userOrIdentifier, id: userOrIdentifier.id ?? userId ?? null }
+      : { id: userId || null, email: userOrIdentifier || 'System', username: userOrIdentifier || 'System' };
+    await createAuditLog({ user, action, details, ipAddress });
   } catch (err) {
     console.error('Error logging auth action:', err);
   }
@@ -128,7 +128,7 @@ exports.login = async (req, res) => {
     // Single Active Session: Save new refresh token in DB, invalidating any previous session
     await pool.query(`UPDATE users SET refresh_token = ? WHERE id = ?`, [refreshToken, user.id]);
 
-    await createLog(user.id, user.username, 'LOGIN_SUCCESS', `User ${user.username} logged in successfully.`);
+    await createLog(user.id, user, 'LOGIN_SUCCESS', `User ${user.username} logged in successfully.`);
 
     const refreshCookieOptions = {
       ...COOKIE_OPTIONS_REFRESH,
@@ -230,13 +230,13 @@ exports.logout = async (req, res) => {
       try {
         const decoded = jwt.verify(refreshToken, REFRESH_SECRET);
         await pool.query(`UPDATE users SET refresh_token = NULL WHERE id = ?`, [decoded.id]);
-        await createLog(decoded.id, decoded.username || 'User', 'LOGOUT_SUCCESS', 'User logged out successfully.');
+        await createLog(decoded.id, { id: decoded.id, email: decoded.email || decoded.username || 'User', username: decoded.username || 'User' }, 'LOGOUT_SUCCESS', 'User logged out successfully.');
       } catch (e) {
         // Token invalid, ignore DB clear step
       }
     } else if (req.user && req.user.id) {
       await pool.query(`UPDATE users SET refresh_token = NULL WHERE id = ?`, [req.user.id]);
-      await createLog(req.user.id, req.user.username || 'User', 'LOGOUT_SUCCESS', 'User logged out successfully.');
+      await createLog(req.user.id, req.user, 'LOGOUT_SUCCESS', 'User logged out successfully.');
     }
 
     // Clear HttpOnly authentication cookies
@@ -286,7 +286,7 @@ exports.forgotPassword = async (req, res) => {
       [resetToken, expiresAt, user.id]
     );
 
-    await createLog(user.id, user.username, 'FORGOT_PASSWORD_REQUEST', `Requested password reset for ${user.email}`);
+    await createLog(user.id, user, 'FORGOT_PASSWORD_REQUEST', `Requested password reset for ${user.email}`);
 
     const frontendHost = process.env.FRONTEND_URL || 'http://localhost:3000';
     const resetLink = `${frontendHost}/reset-password?token=${resetToken}`;
@@ -349,7 +349,7 @@ exports.resetPassword = async (req, res) => {
 
     await recordPasswordHistory(user.id, hashedPassword);
 
-    await createLog(user.id, user.username, 'RESET_PASSWORD_SUCCESS', `Password reset completed for ${user.username}`);
+    await createLog(user.id, user, 'RESET_PASSWORD_SUCCESS', `Password reset completed for ${user.username}`);
 
     res.json({
       message: 'Your password has been reset successfully. Please log in with your new password.'
@@ -453,7 +453,7 @@ exports.updateProfile = async (req, res) => {
       [firstname.trim(), lastname.trim(), email.trim().toLowerCase(), imagePath, userId]
     );
 
-    await createLog(userId, req.user.username, 'UPDATE_PROFILE', `Updated profile for ${firstname} ${lastname}`);
+    await createLog(userId, req.user, 'UPDATE_PROFILE', `Updated profile for ${firstname} ${lastname}`);
 
     // Return updated user data
     const [userRows] = await pool.query(
@@ -593,7 +593,7 @@ exports.changePassword = async (req, res) => {
     // Update password and store new refresh token in DB
     await pool.query(`UPDATE users SET password = ?, refresh_token = ? WHERE id = ?`, [newHash, refreshToken, userId]);
 
-    await createLog(userId, user.username, 'CHANGE_PASSWORD', 'Password changed successfully. Updated active session tokens.');
+    await createLog(userId, userData, 'CHANGE_PASSWORD', 'Password changed successfully. Updated active session tokens.');
 
     // Set updated HttpOnly authentication cookies
     res.cookie('accessToken', accessToken, COOKIE_OPTIONS_ACCESS);

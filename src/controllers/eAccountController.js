@@ -1,4 +1,5 @@
 const { getPool } = require('../config/db');
+const { createAuditLog } = require('../utils/auditLogger');
 
 // Helper to count words in string
 function countWords(str) {
@@ -191,6 +192,12 @@ exports.createEAccount = async (req, res) => {
 
     const [newRows] = await pool.query('SELECT * FROM e_accounts WHERE id = ?', [result.insertId]);
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'CREATE_E_ACCOUNT',
+      details: `Created e-account ${name || email_name || normType}`
+    });
+
     res.status(201).json({
       message: 'E-Account created successfully',
       account: newRows[0]
@@ -211,6 +218,12 @@ exports.deleteEAccount = async (req, res) => {
     }
 
     await pool.query('UPDATE e_accounts SET is_delete = 1 WHERE id = ?', [id]);
+    await createAuditLog({
+      user: req.user || null,
+      action: 'DELETE_E_ACCOUNT',
+      details: `Deleted e-account ID ${id}`
+    });
+
     res.json({ message: 'E-Account deleted successfully' });
   } catch (error) {
     console.error('Error deleting e-account:', error);
@@ -304,6 +317,12 @@ exports.updateEAccount = async (req, res) => {
     if (updatedRows.length === 0) {
       return res.status(404).json({ message: 'E-Account not found.' });
     }
+
+    await createAuditLog({
+      user: req.user || null,
+      action: 'UPDATE_E_ACCOUNT',
+      details: `Updated e-account ${name || email_name || normType}`
+    });
 
     res.json({
       message: 'E-Account updated successfully',

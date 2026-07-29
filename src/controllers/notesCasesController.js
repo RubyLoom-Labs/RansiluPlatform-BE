@@ -1,5 +1,6 @@
 const { getPool } = require('../config/db');
 const ExcelJS = require('exceljs');
+const { createAuditLog } = require('../utils/auditLogger');
 
 function formatDate(d) {
   if (!d) return null;
@@ -567,6 +568,12 @@ exports.deleteNotesCase = async (req, res) => {
       [id]
     );
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'DELETE_CASE_OR_NOTE',
+      details: `Deleted note/case ID ${id}`
+    });
+
     res.json({
       success: true,
       message: 'Note or Case deleted successfully',
@@ -686,6 +693,12 @@ exports.updateSituation = async (req, res) => {
       [desc, sDate, eDate, sitId, caseId]
     );
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'UPDATE_CASE_SITUATION',
+      details: `Updated situation ${sitId} in case ${caseId}`
+    });
+
     res.json({
       success: true,
       message: 'Situation updated successfully.',
@@ -726,6 +739,12 @@ exports.deleteSituation = async (req, res) => {
       `UPDATE situation SET status = 0, is_delete = 1 WHERE id = ? AND notesandcase_id = ?`,
       [sitId, caseId]
     );
+
+    await createAuditLog({
+      user: req.user || null,
+      action: 'DELETE_CASE_SITUATION',
+      details: `Deleted situation ${sitId} from case ${caseId}`
+    });
 
     res.json({ success: true, message: 'Situation deleted successfully.', id: sitId });
   } catch (error) {

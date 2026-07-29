@@ -39,7 +39,24 @@ async function authenticateToken(req, res, next) {
         return res.status(403).json({ message: 'User account is inactive or deleted.' });
       }
 
-      req.user = rows[0];
+      const user = rows[0];
+      let permissions = [];
+
+      if (user.user_role_id) {
+        const [permRows] = await pool.query(
+          `SELECT p.id, p.tab_name, p.action, p.permission_name
+           FROM role_permissions rp
+           JOIN permissions p ON rp.permission_id = p.id
+           WHERE rp.role_id = ? AND rp.is_delete = 0 AND rp.status = 1 AND p.is_delete = 0 AND p.status = 1`,
+          [user.user_role_id]
+        );
+        permissions = permRows;
+      }
+
+      req.user = {
+        ...user,
+        permissions
+      };
       next();
     } catch (dbErr) {
       console.error('Auth Middleware error:', dbErr);

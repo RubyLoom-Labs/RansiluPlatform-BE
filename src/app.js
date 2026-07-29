@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -15,14 +17,28 @@ const ownershipRoutes = require('./routes/ownershipRoutes');
 const notesCasesRoutes = require('./routes/notesCasesRoutes');
 const settingsRoutes = require('./routes/settings');
 const authRoutes = require('./routes/auth');
+const { authenticateToken } = require('./middlewares/authMiddleware');
+const { requireRoutePermission } = require('./middlewares/permissionMiddleware');
 
 const app = express();
 app.set('trust proxy', true);
+
+const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'https://musicstation.ransilumusic.com,http://localhost:3000')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const isOriginAllowed = (origin) => !origin || allowedOrigins.includes(origin);
+
 // Middleware
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (e.g. mobile apps, curl) or echo requesting origin
-    callback(null, origin || true);
+    if (isOriginAllowed(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error('Origin not allowed by CORS'));
   },
   credentials: true,
 }));
@@ -35,21 +51,21 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Routes
 app.use('/api/auth', authRoutes);
-app.use('/api/artists', artistRoutes);
-app.use('/api/songs', songRoutes);
-app.use('/api/distributors', distributorRoutes);
-app.use('/api/ringtones', ringtoneRoutes);
-app.use('/api/record-label', recordLabelRoutes);
-app.use('/api/recode-labels', recordLabelRoutes);
-app.use('/api/albums', albumRoutes);
-app.use('/api/e-accounts', eAccountRoutes);
-app.use('/api/calendar/events', calendarRoutes);
-app.use('/api/revenue', revenueRoutes);
-app.use('/api/ownership', ownershipRoutes);
-app.use('/api/ownerships', ownershipRoutes);
-app.use('/api/notes-and-cases', notesCasesRoutes);
-app.use('/api/notes-cases', notesCasesRoutes);
-app.use('/api/settings', settingsRoutes);
+app.use('/api/artists', authenticateToken, requireRoutePermission, artistRoutes);
+app.use('/api/songs', authenticateToken, requireRoutePermission, songRoutes);
+app.use('/api/distributors', authenticateToken, requireRoutePermission, distributorRoutes);
+app.use('/api/ringtones', authenticateToken, requireRoutePermission, ringtoneRoutes);
+app.use('/api/record-label', authenticateToken, requireRoutePermission, recordLabelRoutes);
+app.use('/api/recode-labels', authenticateToken, requireRoutePermission, recordLabelRoutes);
+app.use('/api/albums', authenticateToken, requireRoutePermission, albumRoutes);
+app.use('/api/e-accounts', authenticateToken, requireRoutePermission, eAccountRoutes);
+app.use('/api/calendar/events', authenticateToken, requireRoutePermission, calendarRoutes);
+app.use('/api/revenue', authenticateToken, requireRoutePermission, revenueRoutes);
+app.use('/api/ownership', authenticateToken, requireRoutePermission, ownershipRoutes);
+app.use('/api/ownerships', authenticateToken, requireRoutePermission, ownershipRoutes);
+app.use('/api/notes-and-cases', authenticateToken, requireRoutePermission, notesCasesRoutes);
+app.use('/api/notes-cases', authenticateToken, requireRoutePermission, notesCasesRoutes);
+app.use('/api/settings', authenticateToken, requireRoutePermission, settingsRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

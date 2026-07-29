@@ -1,4 +1,5 @@
 const { getPool } = require('../config/db');
+const { createAuditLog } = require('../utils/auditLogger');
 
 // Helper to convert string to Title Case
 function toTitleCase(str) {
@@ -575,6 +576,12 @@ exports.createAlbum = async (req, res) => {
       }
     }
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'CREATE_ALBUM',
+      details: `Created album ${displayName}`
+    });
+
     res.status(201).json({
       message: 'Album created successfully',
       id: albumId
@@ -656,6 +663,12 @@ exports.updateAlbum = async (req, res) => {
       }
     }
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'UPDATE_ALBUM',
+      details: `Updated album ${displayName}`
+    });
+
     res.json({ message: 'Album updated successfully' });
   } catch (error) {
     console.error('Error updating album:', error);
@@ -708,6 +721,12 @@ exports.deleteAlbum = async (req, res) => {
       `UPDATE album SET is_delete = 1 WHERE id = ?`,
       [id]
     );
+
+    await createAuditLog({
+      user: req.user || null,
+      action: 'DELETE_ALBUM',
+      details: `Deleted album ID ${id}`
+    });
 
     res.json({ success: true, message: 'Album deleted successfully' });
   } catch (error) {

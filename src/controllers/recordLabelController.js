@@ -1,4 +1,5 @@
 const { getPool } = require('../config/db');
+const { createAuditLog } = require('../utils/auditLogger');
 
 // Helper function to format strings to Title Case
 function toTitleCase(str) {
@@ -411,6 +412,12 @@ exports.createRecordLabel = async (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
     const img = image_url ? (image_url.startsWith('http') || image_url.startsWith('data:') ? image_url : `${host}${image_url.startsWith('/') ? '' : '/'}${image_url}`) : null;
 
+    await createAuditLog({
+      user: req.user || null,
+      action: 'CREATE_RECORD_LABEL',
+      details: `Created record label ${displayName}`
+    });
+
     res.status(201).json({
       message: 'Record label created successfully',
       id: result.insertId,
@@ -466,6 +473,12 @@ exports.updateRecordLabel = async (req, res) => {
        WHERE id = ? AND is_delete = 0`,
       [convertedName, displayName, image_url || null, id]
     );
+
+    await createAuditLog({
+      user: req.user || null,
+      action: 'UPDATE_RECORD_LABEL',
+      details: `Updated record label ${displayName}`
+    });
 
     res.json({ message: 'Record label updated successfully' });
   } catch (error) {

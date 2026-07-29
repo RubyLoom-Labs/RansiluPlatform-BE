@@ -28,15 +28,22 @@ const MODULE_ALIASES = {
   settings: 'settings',
 };
 
-function normalizeModule(moduleName) {
-  if (!moduleName) return '';
+const NORMALIZED_MODULE_ALIASES = Object.fromEntries(
+  Object.entries(MODULE_ALIASES).map(([key, value]) => [normalizeAliasKey(key), value])
+);
 
-  const cleaned = String(moduleName)
+function normalizeAliasKey(value) {
+  return String(value)
     .toLowerCase()
     .replace(/[_\s&-]+/g, '_')
     .replace(/[^a-z0-9_]/g, '');
+}
 
-  return MODULE_ALIASES[cleaned] || cleaned;
+function normalizeModule(moduleName) {
+  if (!moduleName) return '';
+
+  const cleaned = normalizeAliasKey(moduleName);
+  return NORMALIZED_MODULE_ALIASES[cleaned] || cleaned;
 }
 
 function normalizeAction(action) {

@@ -113,15 +113,14 @@ exports.getArtists = async (req, res) => {
     let dataQuery = `
       SELECT a.*, 
         (
-          SELECT COUNT(DISTINCT rel.song_id)
-          FROM (
-            SELECT song_id FROM songSinger WHERE artist_id = a.id
-            UNION
-            SELECT song_id FROM songLyrics WHERE artist_id = a.id
-            UNION
-            SELECT song_id FROM songmusician WHERE artist_id = a.id
-          ) as rel
-          JOIN songs s ON rel.song_id = s.id AND (s.status = 1 OR s.status IS NULL)
+          SELECT COUNT(DISTINCT s.id)
+          FROM songs s
+          WHERE (s.status = 1 OR s.status IS NULL)
+          AND (
+            EXISTS (SELECT 1 FROM songSinger ss WHERE ss.song_id = s.id AND ss.artist_id = a.id) OR
+            EXISTS (SELECT 1 FROM songLyrics sl WHERE sl.song_id = s.id AND sl.artist_id = a.id) OR
+            EXISTS (SELECT 1 FROM songmusician sm WHERE sm.song_id = s.id AND sm.artist_id = a.id)
+          )
         ) as songsCount 
       FROM artists a 
       ${whereClauseStr}

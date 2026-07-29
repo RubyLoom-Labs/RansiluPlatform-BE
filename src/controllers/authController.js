@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { getPool } = require('../config/db');
 const { JWT_SECRET } = require('../middlewares/authMiddleware');
+const { normalizePermissionEntry } = require('../middlewares/permissionMiddleware');
 const { validatePasswordSecurity, isPasswordReused, recordPasswordHistory } = require('../utils/passwordHelper');
 const { createAuditLog } = require('../utils/auditLogger');
 
@@ -25,13 +26,22 @@ const COOKIE_OPTIONS_REFRESH = {
   maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
 };
 
+function getClientIp(req) {
+  const forwardedFor = req.headers && req.headers['x-forwarded-for'];
+  if (typeof forwardedFor === 'string' && forwardedFor.trim()) {
+    return forwardedFor.split(',')[0].trim();
+  }
+
+  return req.ip || req.socket?.remoteAddress || '127.0.0.1';
+}
+
 // Helper to create audit logs
 async function createLog(userId, userOrIdentifier, action, details = null, ipAddress = null) {
   try {
     const user = userOrIdentifier && typeof userOrIdentifier === 'object'
       ? { ...userOrIdentifier, id: userOrIdentifier.id ?? userId ?? null }
       : { id: userId || null, email: userOrIdentifier || 'System', username: userOrIdentifier || 'System' };
-    await createAuditLog({ user, action, details, ipAddress });
+    await createAuditLog({ user, action, details, ipAddress: ipAddress || getClientIp({ headers: {}, ip: '127.0.0.1' }) });
   } catch (err) {
     console.error('Error logging auth action:', err);
   }
@@ -63,6 +73,7 @@ exports.login = async (req, res) => {
     );
 
     if (userRows.length === 0) {
+      await createLog(null, { id: null, email: loginCredential, username: loginCredential }, 'LOGIN_FAILED', `Failed login attempt for ${loginCredential}.`, getClientIp(req));
       return res.status(401).json({ message: 'Invalid email/username or password.' });
     }
 
@@ -70,6 +81,7 @@ exports.login = async (req, res) => {
 
     // Check account status
     if (user.status === 0) {
+      await createLog(user.id, user, 'LOGIN_FAILED', 'Login attempt blocked because the account is inactive or disabled.', getClientIp(req));
       return res.status(403).json({ message: 'Your account is deactivated. Please contact an administrator.' });
     }
 
@@ -88,6 +100,7 @@ exports.login = async (req, res) => {
     }
 
     if (!isPasswordValid) {
+      await createLog(user.id, user, 'LOGIN_FAILED', 'Login attempt failed because the password was invalid.', getClientIp(req));
       return res.status(401).json({ message: 'Invalid email/username or password.' });
     }
 
@@ -128,7 +141,7 @@ exports.login = async (req, res) => {
     // Single Active Session: Save new refresh token in DB, invalidating any previous session
     await pool.query(`UPDATE users SET refresh_token = ? WHERE id = ?`, [refreshToken, user.id]);
 
-    await createLog(user.id, user, 'LOGIN_SUCCESS', `User ${user.username} logged in successfully.`);
+    await createLog(user.id, user, 'LOGIN_SUCCESS', `User ${user.username} logged in successfully.`, getClientIp(req));
 
     const refreshCookieOptions = {
       ...COOKIE_OPTIONS_REFRESH,
@@ -390,7 +403,7 @@ exports.getMe = async (req, res) => {
          WHERE rp.role_id = ? AND rp.is_delete = 0 AND rp.status = 1 AND p.is_delete = 0 AND p.status = 1`,
         [user.user_role_id]
       );
-      permissions = permRows;
+      permissions = permRows.map(normalizePermissionEntry);
     }
 
     res.json({
@@ -475,7 +488,7 @@ exports.updateProfile = async (req, res) => {
          WHERE rp.role_id = ? AND rp.is_delete = 0 AND rp.status = 1 AND p.is_delete = 0 AND p.status = 1`,
         [user.user_role_id]
       );
-      permissions = permRows;
+      permissions = permRows.map(normalizePermissionEntry);
     }
 
     res.json({
@@ -573,7 +586,7 @@ exports.changePassword = async (req, res) => {
          WHERE rp.role_id = ? AND rp.is_delete = 0 AND rp.status = 1 AND p.is_delete = 0 AND p.status = 1`,
         [userData.user_role_id]
       );
-      permissions = permRows;
+      permissions = permRows.map(normalizePermissionEntry);
     }
 
     const tokenPayload = {

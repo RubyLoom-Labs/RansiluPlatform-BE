@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { getPool } = require('../config/db');
+const { normalizePermissionEntry } = require('./permissionMiddleware');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'ransilu_platform_jwt_secret_key_2026';
 
@@ -50,7 +51,7 @@ async function authenticateToken(req, res, next) {
            WHERE rp.role_id = ? AND rp.is_delete = 0 AND rp.status = 1 AND p.is_delete = 0 AND p.status = 1`,
           [user.user_role_id]
         );
-        permissions = permRows;
+        permissions = permRows.map(normalizePermissionEntry);
       }
 
       req.user = {

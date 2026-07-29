@@ -1,5 +1,6 @@
 const bcrypt = require('bcryptjs');
 const { getPool } = require('../config/db');
+const { normalizePermissionEntry } = require('../middlewares/permissionMiddleware');
 const { validatePasswordSecurity, isPasswordReused, recordPasswordHistory } = require('../utils/passwordHelper');
 const { createAuditLog } = require('../utils/auditLogger');
 
@@ -451,7 +452,7 @@ exports.getPermissions = async (req, res) => {
     );
 
     res.json({
-      permissions: rows
+      permissions: rows.map(normalizePermissionEntry)
     });
   } catch (error) {
     console.error('Error fetching permissions:', error);

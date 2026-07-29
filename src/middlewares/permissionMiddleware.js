@@ -58,6 +58,37 @@ function normalizeAction(action) {
   return normalized;
 }
 
+function normalizeDisplayName(moduleName) {
+  const normalizedModule = normalizeModule(moduleName);
+
+  switch (normalizedModule) {
+    case 'record_labels':
+      return 'Record Labels';
+    case 'notes_cases':
+      return 'Notes & Cases';
+    case 'eaccounts':
+      return 'E-Accounts';
+    default:
+      return String(moduleName || '').trim() || '';
+  }
+}
+
+function normalizePermissionEntry(permissionEntry) {
+  const rawTabName = permissionEntry?.tab_name || permissionEntry?.permission_name || '';
+  const normalizedModule = normalizeModule(rawTabName);
+  const normalizedAction = normalizeAction(permissionEntry?.action || '');
+  const normalizedDisplayName = normalizeDisplayName(rawTabName);
+  const normalizedPermissionName = String(permissionEntry?.permission_name || '').trim();
+
+  return {
+    ...permissionEntry,
+    module_key: normalizedModule,
+    tab_name: normalizedDisplayName || rawTabName,
+    action: normalizedAction || permissionEntry?.action || '',
+    permission_name: normalizedPermissionName || `${normalizedDisplayName || rawTabName} - ${String(normalizedAction || '').toUpperCase()}`,
+  };
+}
+
 function matchPermission(permissionEntry, moduleName, action) {
   const requestedModule = normalizeModule(moduleName);
   const requestedAction = normalizeAction(action);
@@ -138,4 +169,7 @@ module.exports = {
   matchPermission,
   inferModule,
   inferAction,
+  normalizeModule,
+  normalizeAction,
+  normalizePermissionEntry,
 };

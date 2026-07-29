@@ -17,7 +17,7 @@ const settingsRoutes = require('./routes/settings');
 const authRoutes = require('./routes/auth');
 
 const app = express();
-
+app.set('trust proxy', true);
 // Middleware
 app.use(cors({
   origin: (origin, callback) => {

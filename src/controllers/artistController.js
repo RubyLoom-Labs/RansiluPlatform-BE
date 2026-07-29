@@ -174,7 +174,8 @@ exports.getArtists = async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching artists:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    const errorMessage = (typeof error !== 'undefined' && error && (error.message || error.sqlMessage || error.toString())) ? (error.message || error.sqlMessage || error.toString()) : (typeof err !== 'undefined' && err && (err.message || err.sqlMessage || err.toString())) ? (err.message || err.sqlMessage || err.toString()) : '';
+    return res.status(500).json({ message: errorMessage });
   }
 };
 
@@ -263,7 +264,8 @@ exports.createArtist = async (req, res) => {
     });
   } catch (error) {
     console.error('Error creating artist:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    const errorMessage = (typeof error !== 'undefined' && error && (error.message || error.sqlMessage || error.toString())) ? (error.message || error.sqlMessage || error.toString()) : (typeof err !== 'undefined' && err && (err.message || err.sqlMessage || err.toString())) ? (err.message || err.sqlMessage || err.toString()) : '';
+    return res.status(500).json({ message: errorMessage });
   }
 };
 
@@ -401,7 +403,8 @@ exports.updateArtist = async (req, res) => {
     });
   } catch (error) {
     console.error('Error updating artist:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    const errorMessage = (typeof error !== 'undefined' && error && (error.message || error.sqlMessage || error.toString())) ? (error.message || error.sqlMessage || error.toString()) : (typeof err !== 'undefined' && err && (err.message || err.sqlMessage || err.toString())) ? (err.message || err.sqlMessage || err.toString()) : '';
+    return res.status(500).json({ message: errorMessage });
   }
 };
 
@@ -431,7 +434,8 @@ exports.checkArtistName = async (req, res) => {
     res.json({ exists });
   } catch (error) {
     console.error('Error checking artist name:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    const errorMessage = (typeof error !== 'undefined' && error && (error.message || error.sqlMessage || error.toString())) ? (error.message || error.sqlMessage || error.toString()) : (typeof err !== 'undefined' && err && (err.message || err.sqlMessage || err.toString())) ? (err.message || err.sqlMessage || err.toString()) : '';
+    return res.status(500).json({ message: errorMessage });
   }
 };
 
@@ -495,7 +499,8 @@ exports.getArtistById = async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching artist by ID:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    const errorMessage = (typeof error !== 'undefined' && error && (error.message || error.sqlMessage || error.toString())) ? (error.message || error.sqlMessage || error.toString()) : (typeof err !== 'undefined' && err && (err.message || err.sqlMessage || err.toString())) ? (err.message || err.sqlMessage || err.toString()) : '';
+    return res.status(500).json({ message: errorMessage });
   }
 };
 
@@ -710,7 +715,8 @@ exports.getArtistSongs = async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching artist songs:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    const errorMessage = (typeof error !== 'undefined' && error && (error.message || error.sqlMessage || error.toString())) ? (error.message || error.sqlMessage || error.toString()) : (typeof err !== 'undefined' && err && (err.message || err.sqlMessage || err.toString())) ? (err.message || err.sqlMessage || err.toString()) : '';
+    return res.status(500).json({ message: errorMessage });
   }
 };
 
@@ -781,7 +787,8 @@ exports.getArtistAlbums = async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching artist albums:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    const errorMessage = (typeof error !== 'undefined' && error && (error.message || error.sqlMessage || error.toString())) ? (error.message || error.sqlMessage || error.toString()) : (typeof err !== 'undefined' && err && (err.message || err.sqlMessage || err.toString())) ? (err.message || err.sqlMessage || err.toString()) : '';
+    return res.status(500).json({ message: errorMessage });
   }
 };
 
@@ -823,7 +830,8 @@ exports.deleteArtist = async (req, res) => {
     res.json({ message: 'Artist deleted successfully' });
   } catch (error) {
     console.error('Error deleting artist:', error);
-    res.status(500).json({ message: 'Internal server error' });
+    const errorMessage = (typeof error !== 'undefined' && error && (error.message || error.sqlMessage || error.toString())) ? (error.message || error.sqlMessage || error.toString()) : (typeof err !== 'undefined' && err && (err.message || err.sqlMessage || err.toString())) ? (err.message || err.sqlMessage || err.toString()) : '';
+    return res.status(500).json({ message: errorMessage });
   }
 };
 

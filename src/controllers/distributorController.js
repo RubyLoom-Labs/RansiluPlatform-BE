@@ -387,7 +387,6 @@ exports.createDistributor = async (req, res) => {
     }
 
     const lowercaseEmail = email.trim().toLowerCase();
-    const normalizedCompany = company.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 
     // Email format validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -395,23 +394,15 @@ exports.createDistributor = async (req, res) => {
       return res.status(400).json({ message: 'Invalid email address format' });
     }
 
-    // Uniqueness validation (check against non-deleted is_deleted = 0 records)
+    // Email uniqueness validation (company name is no longer blocked)
     const [existing] = await pool.query(
-      `SELECT id, company_name, email FROM distributors 
-       WHERE (LOWER(REPLACE(company_name, ' ', '')) = ? OR LOWER(email) = ?) 
-         AND is_deleted = 0`,
-      [normalizedCompany, lowercaseEmail]
+      `SELECT id, email FROM distributors 
+       WHERE LOWER(email) = ? AND is_deleted = 0`,
+      [lowercaseEmail]
     );
 
     if (existing.length > 0) {
-      for (const row of existing) {
-        if (row.email.toLowerCase() === lowercaseEmail) {
-          return res.status(400).json({ message: 'Email already exists' });
-        }
-        if (row.company_name.toLowerCase().replace(/[^a-z0-9]/g, '') === normalizedCompany) {
-          return res.status(400).json({ message: 'Distributor name already exists' });
-        }
-      }
+      return res.status(400).json({ message: 'Email already exists' });
     }
 
     const distributor_code = await generateDistributorCode(pool);
@@ -449,7 +440,6 @@ exports.updateDistributor = async (req, res) => {
     }
 
     const lowercaseEmail = email.trim().toLowerCase();
-    const normalizedCompany = company.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 
     // Email format validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -457,23 +447,15 @@ exports.updateDistributor = async (req, res) => {
       return res.status(400).json({ message: 'Invalid email address format' });
     }
 
-    // Uniqueness validation (check against non-deleted is_deleted = 0 records)
+    // Email uniqueness validation (company name is no longer blocked)
     const [existing] = await pool.query(
-      `SELECT id, company_name, email FROM distributors 
-       WHERE (LOWER(REPLACE(company_name, ' ', '')) = ? OR LOWER(email) = ?) 
-         AND is_deleted = 0 AND id != ?`,
-      [normalizedCompany, lowercaseEmail, id]
+      `SELECT id, email FROM distributors 
+       WHERE LOWER(email) = ? AND is_deleted = 0 AND id != ?`,
+      [lowercaseEmail, id]
     );
 
     if (existing.length > 0) {
-      for (const row of existing) {
-        if (row.email.toLowerCase() === lowercaseEmail) {
-          return res.status(400).json({ message: 'Email already exists' });
-        }
-        if (row.company_name.toLowerCase().replace(/[^a-z0-9]/g, '') === normalizedCompany) {
-          return res.status(400).json({ message: 'Distributor name already exists' });
-        }
-      }
+      return res.status(400).json({ message: 'Email already exists' });
     }
 
     const [currentDist] = await pool.query('SELECT status FROM distributors WHERE id = ? AND is_deleted = 0', [id]);

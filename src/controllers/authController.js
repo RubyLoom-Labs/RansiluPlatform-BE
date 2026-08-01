@@ -133,9 +133,9 @@ exports.login = async (req, res) => {
       role_name: user.role_name || 'User'
     };
 
-    // Generate JWT Access Token (15m) & Refresh Token (30d if rememberMe, else 7d)
+    // Generate JWT Access Token (24h) & Refresh Token (30d if rememberMe, else 7d)
     const refreshDays = rememberMe ? 30 : 7;
-    const accessToken = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '15m' });
+    const accessToken = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '24h' });
     const refreshToken = jwt.sign({ id: user.id, username: user.username }, REFRESH_SECRET, { expiresIn: `${refreshDays}d` });
 
     // Single Active Session: Save new refresh token in DB, invalidating any previous session
@@ -218,7 +218,7 @@ exports.refreshToken = async (req, res) => {
         role_name: user.role_name || 'User'
       };
 
-      const newAccessToken = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '15m' });
+      const newAccessToken = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '24h' });
 
       // Set new Access Token HttpOnly Cookie
       res.cookie('accessToken', newAccessToken, COOKIE_OPTIONS_ACCESS);
@@ -600,7 +600,7 @@ exports.changePassword = async (req, res) => {
     };
 
     // Issue fresh tokens for active session
-    const accessToken = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '15m' });
+    const accessToken = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '24h' });
     const refreshToken = jwt.sign({ id: userData.id, username: userData.username }, REFRESH_SECRET, { expiresIn: '7d' });
 
     // Update password and store new refresh token in DB

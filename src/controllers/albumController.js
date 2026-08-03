@@ -534,10 +534,6 @@ exports.createAlbum = async (req, res) => {
       return res.status(400).json({ message: 'Album name is required' });
     }
 
-    if (!image_url || (typeof image_url === 'string' && !image_url.trim())) {
-      return res.status(400).json({ message: 'Album cover image is required' });
-    }
-
     const convertedName = toSimpleLetters(name);
     const displayName = name.trim();
 
@@ -560,7 +556,7 @@ exports.createAlbum = async (req, res) => {
     const [result] = await pool.query(
       `INSERT INTO album (name, display_name, image_url, record_label_id, release_year, is_delete)
        VALUES (?, ?, ?, ?, ?, 0)`,
-      [convertedName, displayName, image_url, labelId, relYear]
+      [convertedName, displayName, image_url || null, labelId, relYear]
     );
 
     const albumId = result.insertId;
@@ -606,10 +602,6 @@ exports.updateAlbum = async (req, res) => {
 
     if (!name || !name.trim()) {
       return res.status(400).json({ message: 'Album name is required' });
-    }
-
-    if (!image_url || (typeof image_url === 'string' && !image_url.trim())) {
-      return res.status(400).json({ message: 'Album cover image is required' });
     }
 
     const convertedName = toSimpleLetters(name);

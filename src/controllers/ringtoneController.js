@@ -123,11 +123,7 @@ exports.createRingtone = async (req, res) => {
       return res.status(400).json({ message: 'Ringtone account with this name already exists.' });
     }
 
-    if (!req.file) {
-      return res.status(400).json({ message: 'Operator logo file is required.' });
-    }
-
-    const company_logo = `/uploads/images/${req.file.filename}`;
+    const company_logo = req.file ? `/uploads/images/${req.file.filename}` : null;
 
     const status = 1; // Default Active (true)
 

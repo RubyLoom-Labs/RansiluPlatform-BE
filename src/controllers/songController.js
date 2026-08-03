@@ -412,12 +412,12 @@ exports.createSong = async (req, res) => {
     const trackFile = req.files && req.files['track'] ? req.files['track'][0] : null;
     const artFile = req.files && req.files['art'] ? req.files['art'][0] : null;
 
-    if (!trackFile || !artFile) {
-      return res.status(400).json({ message: 'Both song track (MP3) and artwork (Image) are required' });
+    if (!trackFile) {
+      return res.status(400).json({ message: 'Song track (MP3) is required' });
     }
 
     const trackUrl = `/uploads/audio/${trackFile.filename}`;
-    const imageUrl = `/uploads/images/${artFile.filename}`;
+    const imageUrl = artFile ? `/uploads/images/${artFile.filename}` : null;
 
     // Helper to extract array of IDs
     const getArrayInput = (field) => {
@@ -652,7 +652,7 @@ exports.createSong = async (req, res) => {
       ringintoneId: firstRing ? firstRing.ringintoneId : null,
       ringtones: savedRingtones,
       trackUrl: `${host}${trackUrl}`,
-      imageUrl: `${host}${imageUrl}`,
+      imageUrl: imageUrl ? `${host}${imageUrl}` : null,
       singers: singersData.map(s => String(s.artist_id)),
       lyricists: lyricistsData.map(l => String(l.artist_id)),
       musicians: musiciansData.map(m => String(m.artist_id)),

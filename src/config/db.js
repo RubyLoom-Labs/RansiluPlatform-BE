@@ -1,5 +1,4 @@
 const mysql = require('mysql2/promise');
-const runMigrations = require('../migrations/migrate');
 require('dotenv').config();
 
 const dbConfig = {
@@ -35,14 +34,9 @@ async function initializeDatabase() {
     queueLimit: 0,
   });
 
-  // 3. Run migrations and seed data
-  try {
-    await runMigrations(pool);
-    await seedInitialData();
-  } catch (error) {
-    console.error('Failed to initialize database schema or seed data:', error.message);
-    throw error;
-  }
+  // 3. Migrations and seeders are now run manually (not automatically on start)
+  // To run migrations, use: node src/migrations/migrate.js
+  // To seed data, create a separate seeder file and run it manually
 }
 
 async function seedInitialData() {

@@ -393,9 +393,11 @@ exports.getAlbumSongs = async (req, res) => {
     }
 
     const songIds = songRows.map(s => s.id);
-    const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
-    const songConflictsMap = await fetchSongConflictsMap(songIds, pool);
-    const songNotesCasesMap = await fetchSongNotesCasesMap(songRows, pool);
+    const [songLabelsMap, songConflictsMap, songNotesCasesMap] = await Promise.all([
+      fetchSongLabelsMap(songIds, pool, host),
+      fetchSongConflictsMap(songIds, pool),
+      fetchSongNotesCasesMap(songRows, pool)
+    ]);
 
     const formattedSongs = songRows.map(s => {
       const parsedLabels = songLabelsMap[s.id] || [];

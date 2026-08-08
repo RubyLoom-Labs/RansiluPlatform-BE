@@ -247,12 +247,13 @@ async function syncSongOwnership(pool, songIds) {
       };
     });
 
-    // Update songs table for every affected song
+    // Update songs table for every affected song, keeping the ownership % column in sync
     for (const sId of cleanSongIds) {
       const flags = calcMap[sId] || { is_singer: 0, is_lyrics: 0, is_musician: 0, is_recordlabel: 0 };
+      const ownershipPct = (flags.is_recordlabel ? 50 : 0) + (flags.is_lyrics ? 25 : 0) + (flags.is_musician ? 25 : 0);
       await pool.query(
-        `UPDATE songs SET is_singer = ?, is_lyrics = ?, is_musician = ?, is_recordlabel = ? WHERE id = ?`,
-        [flags.is_singer, flags.is_lyrics, flags.is_musician, flags.is_recordlabel, sId]
+        `UPDATE songs SET is_singer = ?, is_lyrics = ?, is_musician = ?, is_recordlabel = ?, ownership = ? WHERE id = ?`,
+        [flags.is_singer, flags.is_lyrics, flags.is_musician, flags.is_recordlabel, ownershipPct, sId]
       );
     }
   } catch (err) {
@@ -563,9 +564,11 @@ exports.getOwnershipById = async (req, res) => {
 
     const host = `${req.protocol}://${req.get('host')}`;
     const songIds = songRows.map(s => s.id);
-    const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
-    const songConflictsMap = await fetchSongConflictsMap(songIds, pool);
-    const songNotesCasesMap = await fetchSongNotesCasesMap(songRows, pool);
+    const [songLabelsMap, songConflictsMap, songNotesCasesMap] = await Promise.all([
+      fetchSongLabelsMap(songIds, pool, host),
+      fetchSongConflictsMap(songIds, pool),
+      fetchSongNotesCasesMap(songRows, pool)
+    ]);
 
     const songOwnershipFlagsMap = {};
     songRows.forEach(s => {

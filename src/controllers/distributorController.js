@@ -73,23 +73,32 @@ exports.getDistributors = async (req, res) => {
     );
     const totalCount = countRows[0].total;
 
-    // Fetch records with distinct song count and active conflicts count
+    // Fetch records with distinct song count and active conflicts count.
+    // Counts are pre-aggregated once via derived tables instead of a correlated
+    // subquery re-executed for every distributor row.
     let dataQuery = `
       SELECT d.*, 
-             (SELECT COUNT(DISTINCT sd.song_id) 
-              FROM songdistributor sd 
-              WHERE sd.distributor_id = d.id AND sd.status = 1 AND sd.is_deleted = 0) as songCount,
-             (SELECT COUNT(DISTINCT sc.Id) 
-              FROM songdistributor sd
-              JOIN songs s ON sd.song_id = s.id
-              JOIN SongConflict sc ON sc.SongId = s.id
-              WHERE sd.distributor_id = d.id 
-                AND sd.status = 1 
-                AND sd.is_deleted = 0 
-                AND s.status = 1 
-                AND sc.Status = 1 
-                AND sc.IsDeleted = 0) as conflictCount
+             COALESCE(songAgg.songCount, 0) as songCount,
+             COALESCE(conflictAgg.conflictCount, 0) as conflictCount
       FROM distributors d
+      LEFT JOIN (
+        SELECT distributor_id, COUNT(DISTINCT song_id) as songCount
+        FROM songdistributor
+        WHERE status = 1 AND is_deleted = 0
+        GROUP BY distributor_id
+      ) songAgg ON songAgg.distributor_id = d.id
+      LEFT JOIN (
+        SELECT sd.distributor_id, COUNT(DISTINCT sc.Id) as conflictCount
+        FROM songdistributor sd
+        JOIN songs s ON sd.song_id = s.id
+        JOIN SongConflict sc ON sc.SongId = s.id
+        WHERE sd.status = 1 
+          AND sd.is_deleted = 0 
+          AND s.status = 1 
+          AND sc.Status = 1 
+          AND sc.IsDeleted = 0
+        GROUP BY sd.distributor_id
+      ) conflictAgg ON conflictAgg.distributor_id = d.id
       ${whereClauseStr}
       ORDER BY d.company_name ASC
     `;
@@ -331,9 +340,11 @@ exports.getDistributorSongs = async (req, res) => {
     }
 
     const songIds = rows.map(s => s.id);
-    const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
-    const songConflictsMap = await fetchSongConflictsMap(songIds, pool);
-    const songNotesCasesMap = await fetchSongNotesCasesMap(rows, pool);
+    const [songLabelsMap, songConflictsMap, songNotesCasesMap] = await Promise.all([
+      fetchSongLabelsMap(songIds, pool, host),
+      fetchSongConflictsMap(songIds, pool),
+      fetchSongNotesCasesMap(rows, pool)
+    ]);
 
     res.json({
       songs: rows.map(s => {

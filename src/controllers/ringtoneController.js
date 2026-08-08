@@ -517,9 +517,11 @@ exports.getRingtoneSongs = async (req, res) => {
     }
 
     const songIds = rows.map(s => s.id);
-    const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
-    const songConflictsMap = await fetchSongConflictsMap(songIds, pool);
-    const songNotesCasesMap = await fetchSongNotesCasesMap(rows, pool);
+    const [songLabelsMap, songConflictsMap, songNotesCasesMap] = await Promise.all([
+      fetchSongLabelsMap(songIds, pool, host),
+      fetchSongConflictsMap(songIds, pool),
+      fetchSongNotesCasesMap(rows, pool)
+    ]);
 
     res.json({
       songs: rows.map(s => {

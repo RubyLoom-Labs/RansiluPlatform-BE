@@ -111,19 +111,22 @@ exports.getArtists = async (req, res) => {
     }
 
     // Fetch paginated and filtered records
+    // songsCount is pre-aggregated once via a derived table instead of a per-row correlated
+    // subquery (which previously re-scanned the songs/relation tables for every artist row).
     let dataQuery = `
-      SELECT a.*, 
-        (
-          SELECT COUNT(DISTINCT s.id)
-          FROM songs s
-          WHERE (s.status = 1 OR s.status IS NULL)
-          AND (
-            EXISTS (SELECT 1 FROM songSinger ss WHERE ss.song_id = s.id AND ss.artist_id = a.id) OR
-            EXISTS (SELECT 1 FROM songLyrics sl WHERE sl.song_id = s.id AND sl.artist_id = a.id) OR
-            EXISTS (SELECT 1 FROM songmusician sm WHERE sm.song_id = s.id AND sm.artist_id = a.id)
-          )
-        ) as songsCount 
-      FROM artists a 
+      SELECT a.*, COALESCE(sc.songsCount, 0) as songsCount
+      FROM artists a
+      LEFT JOIN (
+        SELECT artist_id, COUNT(DISTINCT song_id) as songsCount
+        FROM (
+          SELECT ss.artist_id, ss.song_id FROM songSinger ss JOIN songs s ON s.id = ss.song_id WHERE (s.status = 1 OR s.status IS NULL)
+          UNION ALL
+          SELECT sl.artist_id, sl.song_id FROM songLyrics sl JOIN songs s ON s.id = sl.song_id WHERE (s.status = 1 OR s.status IS NULL)
+          UNION ALL
+          SELECT sm.artist_id, sm.song_id FROM songmusician sm JOIN songs s ON s.id = sm.song_id WHERE (s.status = 1 OR s.status IS NULL)
+        ) combined
+        GROUP BY artist_id
+      ) sc ON sc.artist_id = a.id
       ${whereClauseStr}
       ${orderBy}
     `;
@@ -639,57 +642,123 @@ exports.getArtistSongs = async (req, res) => {
     }
 
     const host = `${req.protocol}://${req.get('host')}`;
-
     const isExport = req.query.export === 'true';
+
+    const search = req.query.search || '';
+    const versionType = req.query.versionType || '';
+    const statusFilter = req.query.status || '';
+    const conflictFilter = req.query.conflict || '';
+    const ownershipFilter = req.query.ownership || '';
+    const sort = req.query.sort || 'Songs A-Z';
+
+    const relSubquery = `
+      SELECT song_id FROM songSinger WHERE artist_id = ?
+      UNION
+      SELECT song_id FROM songLyrics WHERE artist_id = ?
+      UNION
+      SELECT song_id FROM songmusician WHERE artist_id = ?
+    `;
+
+    // Build the same filter set as songController.getSongs so this list matches it
+    let whereClauses = ['(s.is_delete = 0 OR s.is_delete IS NULL)'];
+    let queryParams = [artistId, artistId, artistId];
+
+    if (search) {
+      whereClauses.push(
+        `(s.name LIKE ? OR s.nameSinhala LIKE ?
+          OR EXISTS (SELECT 1 FROM songSinger ss2 JOIN artists a2 ON ss2.artist_id = a2.id WHERE ss2.song_id = s.id AND a2.name LIKE ?)
+          OR EXISTS (SELECT 1 FROM songLyrics sl2 JOIN artists a2 ON sl2.artist_id = a2.id WHERE sl2.song_id = s.id AND a2.name LIKE ?)
+          OR EXISTS (SELECT 1 FROM songmusician sm2 JOIN artists a2 ON sm2.artist_id = a2.id WHERE sm2.song_id = s.id AND a2.name LIKE ?))`
+      );
+      const searchPattern = `%${search}%`;
+      queryParams.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+    }
+
+    if (versionType) {
+      whereClauses.push('s.versionType = ?');
+      queryParams.push(versionType);
+    }
+
+    if (statusFilter !== undefined && statusFilter !== null && statusFilter !== '') {
+      whereClauses.push('s.status = ?');
+      if (statusFilter === 'Active' || String(statusFilter) === '1') {
+        queryParams.push(1);
+      } else if (statusFilter === 'Inactive' || String(statusFilter) === '0') {
+        queryParams.push(0);
+      } else {
+        queryParams.push(statusFilter);
+      }
+    }
+
+    if (conflictFilter !== undefined && conflictFilter !== null && conflictFilter !== '') {
+      const isConflictYes = ['1', 1, 'yes', 'true'].includes(
+        typeof conflictFilter === 'string' ? conflictFilter.toLowerCase() : conflictFilter
+      );
+      whereClauses.push('s.conflict = ?');
+      queryParams.push(isConflictYes ? 'Yes' : 'No');
+    }
+
+    if (ownershipFilter) {
+      if (ownershipFilter === 'High') {
+        whereClauses.push('s.ownership >= 50');
+      } else {
+        whereClauses.push('s.ownership < 50');
+      }
+    }
+
+    const whereClauseStr = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
 
     // Count query for total songs
     const [countRows] = await pool.query(`
-      SELECT COUNT(DISTINCT rel.song_id) as total
-      FROM (
-        SELECT song_id FROM songSinger WHERE artist_id = ?
-        UNION
-        SELECT song_id FROM songLyrics WHERE artist_id = ?
-        UNION
-        SELECT song_id FROM songmusician WHERE artist_id = ?
-      ) as rel
-      JOIN songs s ON rel.song_id = s.id AND (s.status = 1 OR s.status IS NULL)
-    `, [artistId, artistId, artistId]);
+      SELECT COUNT(DISTINCT s.id) as total
+      FROM (${relSubquery}) as rel
+      JOIN songs s ON rel.song_id = s.id
+      ${whereClauseStr}
+    `, queryParams);
 
     const totalCount = countRows[0] ? countRows[0].total : 0;
 
+    // Sorting order - same options as songController.getSongs
+    let orderClause = 'ORDER BY s.name ASC';
+    if (sort === 'Artists A-Z') {
+      orderClause = 'ORDER BY (SELECT a.name FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id = s.id LIMIT 1) ASC';
+    } else if (sort === 'Recently Added') {
+      orderClause = 'ORDER BY s.created_at DESC, s.id DESC';
+    }
+
     let dataQuery = `
-      SELECT DISTINCT s.id, s.name, s.imageUrl, s.isrcCode, s.versionType, s.is_singer, s.is_lyrics, s.is_musician, s.is_recordlabel,
+      SELECT DISTINCT s.id, s.name, s.imageUrl, s.isrcCode, s.versionType, s.status, s.conflict, s.ownership,
+             s.is_singer, s.is_lyrics, s.is_musician, s.is_recordlabel,
              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songSinger ss JOIN artists art ON ss.artist_id = art.id WHERE ss.song_id = s.id) as artist,
              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songLyrics sl JOIN artists art ON sl.artist_id = art.id WHERE sl.song_id = s.id) as lyricist,
              (SELECT GROUP_CONCAT(art.name SEPARATOR ', ') FROM songmusician sm JOIN artists art ON sm.artist_id = art.id WHERE sm.song_id = s.id) as musician
-      FROM (
-        SELECT song_id FROM songSinger WHERE artist_id = ?
-        UNION
-        SELECT song_id FROM songLyrics WHERE artist_id = ?
-        UNION
-        SELECT song_id FROM songmusician WHERE artist_id = ?
-      ) as rel
-      JOIN songs s ON rel.song_id = s.id AND (s.status = 1 OR s.status IS NULL)
-      ORDER BY s.name ASC
+      FROM (${relSubquery}) as rel
+      JOIN songs s ON rel.song_id = s.id
+      ${whereClauseStr}
+      ${orderClause}
     `;
 
     let rows;
+    let queryParamsForData = [...queryParams];
     if (isExport) {
-      [rows] = await pool.query(dataQuery, [artistId, artistId, artistId]);
+      [rows] = await pool.query(dataQuery, queryParamsForData);
     } else {
       dataQuery += ` LIMIT ? OFFSET ?`;
-      [rows] = await pool.query(dataQuery, [artistId, artistId, artistId, limit, offset]);
+      queryParamsForData.push(limit, offset);
+      [rows] = await pool.query(dataQuery, queryParamsForData);
     }
 
     const songIds = rows.map(s => s.id);
-    const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
-    const songConflictsMap = await fetchSongConflictsMap(songIds, pool);
-    const songNotesCasesMap = await fetchSongNotesCasesMap(rows, pool);
+    const [songLabelsMap, songConflictsMap, songNotesCasesMap] = await Promise.all([
+      fetchSongLabelsMap(songIds, pool, host),
+      fetchSongConflictsMap(songIds, pool),
+      fetchSongNotesCasesMap(rows, pool)
+    ]);
 
     const formattedSongs = rows.map(s => {
       const parsedLabels = songLabelsMap[s.id] || [];
       const cCount = songConflictsMap[s.id] || 0;
-      const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : 'No';
+      const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : (s.conflict || 'No');
       const isRec = (s.is_recordlabel === 1 || s.is_recordlabel === true || s.is_recordlabel === '1') ? 50 : 0;
       const isLyr = (s.is_lyrics === 1 || s.is_lyrics === true || s.is_lyrics === '1') ? 25 : 0;
       const isMus = (s.is_musician === 1 || s.is_musician === true || s.is_musician === '1') ? 25 : 0;
@@ -713,7 +782,7 @@ exports.getArtistSongs = async (req, res) => {
         conflicts: conflictText,
         conflict: conflictText,
         notes: songNotesCasesMap[s.id] || s.notes || 'No Cases Or Notes',
-        status: 'Active',
+        status: (s.status === 1 || s.status === true || s.status === '1') ? 'Active' : 'Inactive',
         labels: parsedLabels,
         recordLabels: parsedLabels,
         labelNames: parsedLabels.map(l => l.name).join(', ') || 'None'

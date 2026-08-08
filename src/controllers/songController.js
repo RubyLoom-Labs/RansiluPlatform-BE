@@ -172,14 +172,15 @@ exports.getSongs = async (req, res) => {
       }
     }
 
-    if (conflictFilter) {
-      if (conflictFilter === 'Yes') {
-        whereClauses.push("(songs.conflict = 'Yes' OR songs.notes LIKE '%conflict%' OR songs.notes LIKE '%review%')");
-      } else {
-        whereClauses.push("(songs.conflict != 'Yes' AND songs.notes NOT LIKE '%conflict%' AND songs.notes NOT LIKE '%review%')");
-      }
+    if (conflictFilter !== undefined && conflictFilter !== null && conflictFilter !== '') {
+      const isConflictYes = ['1', 1, 'yes', 'true'].includes(
+        typeof conflictFilter === 'string' ? conflictFilter.toLowerCase() : conflictFilter
+      );
+      whereClauses.push('songs.conflict = ?');
+      queryParams.push(isConflictYes ? 'Yes' : 'No');
     }
 
+    // songs.ownership is kept in sync with is_recordlabel/is_lyrics/is_musician via syncSongOwnership()
     if (ownershipFilter) {
       if (ownershipFilter === 'High') {
         whereClauses.push('songs.ownership >= 50');
@@ -224,24 +225,51 @@ exports.getSongs = async (req, res) => {
     }
 
     const songIds = songs.map((s) => s.id);
+    const host = `${req.protocol}://${req.get('host')}`;
 
-    // 2. Fetch all artist relations for these songs from the separate tables
-    const [relations] = await pool.query(`
-      SELECT ss.song_id, 'singer' as role, a.id as artist_id, a.name as artist_name 
-      FROM songSinger ss 
-      JOIN artists a ON ss.artist_id = a.id 
-      WHERE ss.song_id IN (?)
-      UNION ALL
-      SELECT sl.song_id, 'lyricist' as role, a.id as artist_id, a.name as artist_name 
-      FROM songLyrics sl 
-      JOIN artists a ON sl.artist_id = a.id 
-      WHERE sl.song_id IN (?)
-      UNION ALL
-      SELECT sm.song_id, 'musician' as role, a.id as artist_id, a.name as artist_name 
-      FROM songmusician sm 
-      JOIN artists a ON sm.artist_id = a.id 
-      WHERE sm.song_id IN (?)
-    `, [songIds, songIds, songIds]);
+    // 2-3.5 Fetch all secondary song data in parallel - these queries are all keyed
+    // off songIds/songs independently of each other, so there's no need to wait on them one by one.
+    const [relations, distRelations, ringRelations, labelRelations, songConflictsMap, songNotesCasesMap] = await Promise.all([
+      pool.query(`
+        SELECT ss.song_id, 'singer' as role, a.id as artist_id, a.name as artist_name 
+        FROM songSinger ss 
+        JOIN artists a ON ss.artist_id = a.id 
+        WHERE ss.song_id IN (?)
+        UNION ALL
+        SELECT sl.song_id, 'lyricist' as role, a.id as artist_id, a.name as artist_name 
+        FROM songLyrics sl 
+        JOIN artists a ON sl.artist_id = a.id 
+        WHERE sl.song_id IN (?)
+        UNION ALL
+        SELECT sm.song_id, 'musician' as role, a.id as artist_id, a.name as artist_name 
+        FROM songmusician sm 
+        JOIN artists a ON sm.artist_id = a.id 
+        WHERE sm.song_id IN (?)
+      `, [songIds, songIds, songIds]).then(([rows]) => rows),
+      pool.query(`
+        SELECT sd.song_id, sd.distributor_id, d.company_name
+        FROM songdistributor sd
+        JOIN distributors d ON sd.distributor_id = d.id AND (d.is_deleted = 0 OR d.is_deleted IS NULL)
+        WHERE sd.song_id IN (?) AND (sd.status = 1 OR sd.status IS NULL) AND (sd.is_deleted = 0 OR sd.is_deleted IS NULL)
+      `, [songIds]).then(([rows]) => rows),
+      pool.query(`
+        SELECT sr.song_id, sr.ringintone_id, r.name, sr.ringtone_code, sr.content_code, sr.added_date
+        FROM songringintone sr
+        JOIN ringintone r ON sr.ringintone_id = r.id
+        WHERE sr.song_id IN (?) AND sr.status = 1
+      `, [songIds]).then(([rows]) => rows),
+      pool.query(`
+        SELECT sa.song_id, rl.id as label_id, COALESCE(rl.display_name, rl.name) as label_name, rl.image_url as label_image
+        FROM songalbum sa
+        JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+        JOIN record_label rl ON a.record_label_id = rl.id 
+          AND (rl.status = 1 OR rl.status IS NULL) 
+          AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
+        WHERE sa.song_id IN (?) AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+      `, [songIds]).then(([rows]) => rows),
+      fetchSongConflictsMap(songIds, pool),
+      fetchSongNotesCasesMap(songs, pool)
+    ]);
 
     // 3. Group relationships by song_id
     const songRelations = {};
@@ -258,26 +286,10 @@ exports.getSongs = async (req, res) => {
       }
     });
 
-    // 3.1 Fetch active distributor relations
-    const [distRelations] = await pool.query(`
-      SELECT sd.song_id, sd.distributor_id, d.company_name
-      FROM songdistributor sd
-      JOIN distributors d ON sd.distributor_id = d.id AND (d.is_deleted = 0 OR d.is_deleted IS NULL)
-      WHERE sd.song_id IN (?) AND (sd.status = 1 OR sd.status IS NULL) AND (sd.is_deleted = 0 OR sd.is_deleted IS NULL)
-    `, [songIds]);
-
     const songDistributors = {};
     distRelations.forEach((rel) => {
       songDistributors[rel.song_id] = { id: rel.distributor_id, name: toTitleCase(rel.company_name) };
     });
-
-    // 3.2 Fetch active ringtone relations
-    const [ringRelations] = await pool.query(`
-      SELECT sr.song_id, sr.ringintone_id, r.name, sr.ringtone_code, sr.content_code, sr.added_date
-      FROM songringintone sr
-      JOIN ringintone r ON sr.ringintone_id = r.id
-      WHERE sr.song_id IN (?) AND sr.status = 1
-    `, [songIds]);
 
     const songRingtones = {};
     ringRelations.forEach((rel) => {
@@ -289,18 +301,6 @@ exports.getSongs = async (req, res) => {
         added_date: rel.added_date
       };
     });
-
-    // 3.3 Fetch active album record label relations
-    const host = `${req.protocol}://${req.get('host')}`;
-    const [labelRelations] = await pool.query(`
-      SELECT sa.song_id, rl.id as label_id, COALESCE(rl.display_name, rl.name) as label_name, rl.image_url as label_image
-      FROM songalbum sa
-      JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
-      JOIN record_label rl ON a.record_label_id = rl.id 
-        AND (rl.status = 1 OR rl.status IS NULL) 
-        AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
-      WHERE sa.song_id IN (?) AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
-    `, [songIds]);
 
     const songLabels = {};
     labelRelations.forEach((rel) => {
@@ -318,12 +318,6 @@ exports.getSongs = async (req, res) => {
         });
       }
     });
-
-    // 3.4 Fetch active conflicts from SongConflict table
-    const songConflictsMap = await fetchSongConflictsMap(songIds, pool);
-
-    // 3.5 Fetch active notes & cases from notesandcases table
-    const songNotesCasesMap = await fetchSongNotesCasesMap(songs, pool);
 
     // 4. Map songs to the shape expected by the frontend
     const formattedSongs = songs.map((song) => {
@@ -447,12 +441,14 @@ exports.createSong = async (req, res) => {
     }
 
     // Insert Song - Save name in simple letters (lowercase)
+    // ownership starts at 0 (no is_recordlabel/is_lyrics/is_musician flags yet) and is
+    // recalculated by syncSongOwnership() once ownership documents are linked to the song.
     const lowercaseName = name.trim().toLowerCase();
     const [songResult] = await pool.query(
       `INSERT INTO songs (
         name, nameSinhala, status, trackUrl, imageUrl, isrcCode, other, 
         versionType, versionName, originalSongId, ownership, notes, conflict
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 100, 'No Cases Or Notes', 'No')`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'No Cases Or Notes', 'No')`,
       [
         lowercaseName,
         nameSinhala,
@@ -1317,20 +1313,22 @@ exports.getSongVersions = async (req, res) => {
 
     const versionIds = versionSongs.map((s) => s.id);
     const host = `${req.protocol}://${req.get('host')}`;
-    const songLabelsMap = await fetchSongLabelsMap(versionIds, pool, host);
 
-    // Fetch artist relations for these version songs
-    const [relations] = await pool.query(
-      `SELECT ss.song_id, 'singer' AS role, a.name AS artist_name
-         FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id IN (?)
-       UNION ALL
-       SELECT sl.song_id, 'lyricist' AS role, a.name AS artist_name
-         FROM songLyrics sl JOIN artists a ON sl.artist_id = a.id WHERE sl.song_id IN (?)
-       UNION ALL
-       SELECT sm.song_id, 'musician' AS role, a.name AS artist_name
-         FROM songmusician sm JOIN artists a ON sm.artist_id = a.id WHERE sm.song_id IN (?)`,
-      [versionIds, versionIds, versionIds]
-    );
+    const [songLabelsMap, relations, songConflictsMap] = await Promise.all([
+      fetchSongLabelsMap(versionIds, pool, host),
+      pool.query(
+        `SELECT ss.song_id, 'singer' AS role, a.name AS artist_name
+           FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id IN (?)
+         UNION ALL
+         SELECT sl.song_id, 'lyricist' AS role, a.name AS artist_name
+           FROM songLyrics sl JOIN artists a ON sl.artist_id = a.id WHERE sl.song_id IN (?)
+         UNION ALL
+         SELECT sm.song_id, 'musician' AS role, a.name AS artist_name
+           FROM songmusician sm JOIN artists a ON sm.artist_id = a.id WHERE sm.song_id IN (?)`,
+        [versionIds, versionIds, versionIds]
+      ).then(([rows]) => rows),
+      fetchSongConflictsMap(versionIds, pool)
+    ]);
 
     // Group relations by song_id
     const relMap = {};
@@ -1341,7 +1339,6 @@ exports.getSongVersions = async (req, res) => {
       else if (rel.role === 'musician') relMap[rel.song_id].musicians.push(rel.artist_name);
     });
 
-    const songConflictsMap = await fetchSongConflictsMap(versionIds, pool);
 
     const versions = versionSongs.map((s) => {
       const rels = relMap[s.id] || { singers: [], lyricists: [], musicians: [] };

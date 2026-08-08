@@ -1,9 +1,19 @@
 const app = require('./app');
 const { initializeDatabase } = require('./config/db');
 require('dotenv').config();
-// Trigger restart 2
 
 const PORT = process.env.PORT || 5000;
+
+// Without these, a single unhandled error in any request handler crashes the
+// whole process, dropping all other in-flight requests (seen as net::ERR_CONNECTION_RESET
+// on the client) instead of failing just that one request.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+});
 
 async function startServer() {
   try {

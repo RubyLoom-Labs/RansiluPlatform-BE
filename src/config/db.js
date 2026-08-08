@@ -30,8 +30,12 @@ async function initializeDatabase() {
     ...dbConfig,
     database: process.env.DB_NAME || 'ransilu_db',
     waitForConnections: true,
-    connectionLimit: 10,
+    // Each request needs 2+ connections just for auth/permission checks, so a burst
+    // of concurrent requests can exhaust a small pool and queue/time out under load.
+    connectionLimit: parseInt(process.env.DB_CONNECTION_LIMIT || '25', 10),
     queueLimit: 0,
+    connectTimeout: 10000,
+    enableKeepAlive: true,
   });
 
   // 3. Migrations and seeders are now run manually (not automatically on start)

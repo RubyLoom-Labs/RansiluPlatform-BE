@@ -62,18 +62,21 @@ exports.getRecordLabels = async (req, res) => {
     );
     const totalCount = countRows[0].total;
 
-    // Data query with song count (via album -> songalbum -> songs)
+    // Data query with song count (via album -> songalbum -> songs), pre-aggregated once via
+    // a derived table instead of a correlated subquery re-executed for every record label row.
     let dataQuery = `
-      SELECT rl.*,
-             (SELECT COUNT(DISTINCT sa.song_id)
-              FROM songalbum sa
-              JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
-              JOIN songs s ON sa.song_id = s.id
-              WHERE a.record_label_id = rl.id 
-                AND (sa.status = 1 OR sa.status IS NULL) 
-                AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
-                AND s.status = 1) as songCount
+      SELECT rl.*, COALESCE(songAgg.songCount, 0) as songCount
       FROM record_label rl
+      LEFT JOIN (
+        SELECT a.record_label_id, COUNT(DISTINCT sa.song_id) as songCount
+        FROM songalbum sa
+        JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
+        JOIN songs s ON sa.song_id = s.id
+        WHERE (sa.status = 1 OR sa.status IS NULL) 
+          AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+          AND s.status = 1
+        GROUP BY a.record_label_id
+      ) songAgg ON songAgg.record_label_id = rl.id
       ${whereClauseStr}
       ORDER BY rl.display_name ASC
     `;
@@ -331,9 +334,11 @@ exports.getRecordLabelSongs = async (req, res) => {
     }
 
     const songIds = rows.map(s => s.id);
-    const songLabelsMap = await fetchSongLabelsMap(songIds, pool, host);
-    const songConflictsMap = await fetchSongConflictsMap(songIds, pool);
-    const songNotesCasesMap = await fetchSongNotesCasesMap(rows, pool);
+    const [songLabelsMap, songConflictsMap, songNotesCasesMap] = await Promise.all([
+      fetchSongLabelsMap(songIds, pool, host),
+      fetchSongConflictsMap(songIds, pool),
+      fetchSongNotesCasesMap(rows, pool)
+    ]);
 
     res.json({
       songs: rows.map(s => {

@@ -27,6 +27,13 @@ async function startServer() {
       console.log(`Server is running in development mode on http://localhost:${PORT}`);
     });
 
+    // Node's default keepAliveTimeout (5s) can race with a browser reusing a keep-alive
+    // socket for a rapid burst of requests, closing the socket right as a new request
+    // arrives on it (seen client-side as net::ERR_CONNECTION_RESET). headersTimeout must
+    // stay above keepAliveTimeout or Node clamps it back down.
+    server.keepAliveTimeout = 65000;
+    server.headersTimeout = 66000;
+
     server.on('error', (error) => {
       if (error.code === 'EADDRINUSE') {
         console.error(`\n[ERROR] Port ${PORT} is already in use!`);

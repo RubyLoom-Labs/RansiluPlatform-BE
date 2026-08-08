@@ -31,8 +31,15 @@ async function authenticateToken(req, res, next) {
 
     try {
       const pool = getPool();
+      // Single JOIN query instead of 2 sequential ones - halves the DB connections/round
+      // trips this middleware needs per request, which matters under request bursts.
       const [rows] = await pool.query(
-        `SELECT id, firstname, lastname, email, username, user_role_id, status, is_delete FROM users WHERE id = ? AND is_delete = 0`,
+        `SELECT u.id, u.firstname, u.lastname, u.email, u.username, u.user_role_id, u.status, u.is_delete,
+                p.id as perm_id, p.tab_name, p.action, p.permission_name
+         FROM users u
+         LEFT JOIN role_permissions rp ON rp.role_id = u.user_role_id AND rp.is_delete = 0 AND rp.status = 1
+         LEFT JOIN permissions p ON p.id = rp.permission_id AND p.is_delete = 0 AND p.status = 1
+         WHERE u.id = ? AND u.is_delete = 0`,
         [decoded.id]
       );
 
@@ -40,19 +47,10 @@ async function authenticateToken(req, res, next) {
         return res.status(403).json({ message: 'User account is inactive or deleted.' });
       }
 
-      const user = rows[0];
-      let permissions = [];
-
-      if (user.user_role_id) {
-        const [permRows] = await pool.query(
-          `SELECT p.id, p.tab_name, p.action, p.permission_name
-           FROM role_permissions rp
-           JOIN permissions p ON rp.permission_id = p.id
-           WHERE rp.role_id = ? AND rp.is_delete = 0 AND rp.status = 1 AND p.is_delete = 0 AND p.status = 1`,
-          [user.user_role_id]
-        );
-        permissions = permRows.map(normalizePermissionEntry);
-      }
+      const { perm_id, tab_name, action, permission_name, ...user } = rows[0];
+      const permissions = rows
+        .filter((r) => r.perm_id !== null)
+        .map((r) => normalizePermissionEntry({ id: r.perm_id, tab_name: r.tab_name, action: r.action, permission_name: r.permission_name }));
 
       req.user = {
         ...user,

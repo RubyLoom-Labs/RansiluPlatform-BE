@@ -327,7 +327,7 @@ exports.getSongs = async (req, res) => {
       const labelList = songLabels[song.id] || [];
       const labelsText = labelList.map(l => l.name).join(', ') || 'None';
       const cCount = songConflictsMap[song.id] || 0;
-      const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : (song.conflict || 'No');
+      const conflictText = cCount > 0 ? 'Yes' : 'No';
 
       const isRec = (song.is_recordlabel === 1 || song.is_recordlabel === true || song.is_recordlabel === '1') ? 50 : 0;
       const isLyr = (song.is_lyrics === 1 || song.is_lyrics === true || song.is_lyrics === '1') ? 25 : 0;
@@ -1344,7 +1344,7 @@ exports.getSongVersions = async (req, res) => {
       const rels = relMap[s.id] || { singers: [], lyricists: [], musicians: [] };
       const parsedLabels = songLabelsMap[s.id] || [];
       const cCount = songConflictsMap[s.id] || 0;
-      const conflictText = cCount > 0 ? `${cCount} ${cCount === 1 ? 'Conflict' : 'Conflicts'}` : (s.conflict || 'No');
+      const conflictText = cCount > 0 ? 'Yes' : 'No';
       return {
         id: s.id,
         versionName: s.versionName || toTitleCase(s.name),

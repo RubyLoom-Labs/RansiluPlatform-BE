@@ -641,10 +641,15 @@ exports.getDistributorConflicts = async (req, res) => {
   try {
     const pool = getPool();
     const distributorId = parseInt(req.params.id, 10);
+    const search = (req.query.search || '').trim();
 
     if (isNaN(distributorId)) {
       return res.status(400).json({ message: 'Invalid distributor ID' });
     }
+
+    const params = [distributorId];
+    const searchClause = search ? `AND s.name LIKE ?` : '';
+    if (search) params.push(`%${search}%`);
 
     const [rows] = await pool.query(
       `SELECT 
@@ -668,8 +673,9 @@ exports.getDistributorConflicts = async (req, res) => {
          AND s.status = 1
          AND sc.Status = 1
          AND sc.IsDeleted = 0
+         ${searchClause}
        ORDER BY s.name ASC`,
-      [distributorId]
+      params
     );
 
     const host = `${req.protocol}://${req.get('host')}`;

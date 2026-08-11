@@ -297,6 +297,7 @@ exports.getDistributorSongs = async (req, res) => {
     const limit = parseInt(req.query.limit, 10) || 20;
     const offset = (page - 1) * limit;
     const isExport = req.query.export === 'true';
+    const recordLabelId = req.query.recordLabelId ? parseInt(req.query.recordLabelId, 10) : null;
 
     if (isNaN(distributorId)) {
       return res.status(400).json({ message: 'Invalid distributor ID' });
@@ -304,19 +305,36 @@ exports.getDistributorSongs = async (req, res) => {
 
     const host = `${req.protocol}://${req.get('host')}`;
 
+    // Build optional record label join + filter clause
+    // When recordLabelId is provided we only include songs that belong to that
+    // label (record_label.status = 1 AND record_label.is_delete = 0).
+    const labelJoin = recordLabelId
+      ? `JOIN songalbum sa_filter ON sa_filter.song_id = s.id
+             AND (sa_filter.status = 1 OR sa_filter.status IS NULL)
+             AND (sa_filter.is_delete = 0 OR sa_filter.is_delete IS NULL)
+         JOIN album a_filter ON sa_filter.album_id = a_filter.id
+             AND (a_filter.is_delete = 0 OR a_filter.is_delete IS NULL)
+         JOIN record_label rl_filter ON a_filter.record_label_id = rl_filter.id
+             AND rl_filter.status = 1
+             AND rl_filter.is_delete = 0
+             AND rl_filter.id = ?`
+      : '';
+    const labelParams = recordLabelId ? [recordLabelId] : [];
+
     // Count query
     const [countRows] = await pool.query(
-      `SELECT COUNT(*) as total
+      `SELECT COUNT(DISTINCT s.id) as total
        FROM songdistributor sd
        JOIN songs s ON sd.song_id = s.id
+       ${labelJoin}
        WHERE sd.distributor_id = ? AND sd.status = 1 AND sd.is_deleted = 0 AND s.status = 1`,
-      [distributorId]
+      [...labelParams, distributorId]
     );
     const totalCount = countRows[0].total;
 
     // Fetch songs, active distributor, and singers/lyricists/musicians
     let dataQuery = `
-      SELECT s.id, s.name, sd.updated_date as release_date,
+      SELECT DISTINCT s.id, s.name, sd.updated_date as release_date,
              (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songSinger ss JOIN artists a ON ss.artist_id = a.id WHERE ss.song_id = s.id) as artist,
              (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songLyrics sl JOIN artists a ON sl.artist_id = a.id WHERE sl.song_id = s.id) as lyricist,
              (SELECT GROUP_CONCAT(a.name SEPARATOR ', ') FROM songmusician sm JOIN artists a ON sm.artist_id = a.id WHERE sm.song_id = s.id) as musician,
@@ -327,16 +345,17 @@ exports.getDistributorSongs = async (req, res) => {
              sd.status as mapping_status
       FROM songdistributor sd
       JOIN songs s ON sd.song_id = s.id
+      ${labelJoin}
       WHERE sd.distributor_id = ? AND sd.status = 1 AND sd.is_deleted = 0 AND s.status = 1
       ORDER BY s.name ASC
     `;
 
     let rows;
     if (isExport) {
-      [rows] = await pool.query(dataQuery, [distributorId]);
+      [rows] = await pool.query(dataQuery, [...labelParams, distributorId]);
     } else {
       dataQuery += ` LIMIT ? OFFSET ?`;
-      [rows] = await pool.query(dataQuery, [distributorId, limit, offset]);
+      [rows] = await pool.query(dataQuery, [...labelParams, distributorId, limit, offset]);
     }
 
     const songIds = rows.map(s => s.id);
@@ -726,15 +745,18 @@ exports.getDistributorLabels = async (req, res) => {
         rl.image_url as label_image,
         COUNT(DISTINCT sd.song_id) as song_count
       FROM songdistributor sd
-      JOIN songs s ON sd.song_id = s.id AND (s.status = 1 OR s.status IS NULL)
-      JOIN songalbum sa ON s.id = sa.song_id AND (sa.status = 1 OR sa.status IS NULL) AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
-      JOIN album a ON sa.album_id = a.id AND (a.is_delete = 0 OR a.is_delete IS NULL)
-      JOIN record_label rl ON a.record_label_id = rl.id 
-        AND (rl.status = 1 OR rl.status IS NULL) 
-        AND (rl.is_delete = 0 OR rl.is_delete IS NULL)
-      WHERE sd.distributor_id = ? 
-        AND (sd.status = 1 OR sd.status IS NULL) 
-        AND (sd.is_deleted = 0 OR sd.is_deleted IS NULL)
+      JOIN songs s ON sd.song_id = s.id AND s.status = 1
+      JOIN songalbum sa ON s.id = sa.song_id
+        AND (sa.status = 1 OR sa.status IS NULL)
+        AND (sa.is_delete = 0 OR sa.is_delete IS NULL)
+      JOIN album a ON sa.album_id = a.id
+        AND (a.is_delete = 0 OR a.is_delete IS NULL)
+      JOIN record_label rl ON a.record_label_id = rl.id
+        AND rl.status = 1
+        AND rl.is_delete = 0
+      WHERE sd.distributor_id = ?
+        AND sd.status = 1
+        AND sd.is_deleted = 0
       GROUP BY rl.id, rl.display_name, rl.name, rl.image_url
       ORDER BY label_name ASC
     `, [distributorId]);
@@ -758,3 +780,4 @@ exports.getDistributorLabels = async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 };
+

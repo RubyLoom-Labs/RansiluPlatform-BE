@@ -557,20 +557,51 @@ exports.getRevenueData = async (req, res) => {
 };
 
 // GET /api/revenue/template-export
-// Generates an Excel template (.xlsx) with all active & non-deleted songs (status=1, is_delete=0)
+// Generates an Excel template (.xlsx) with active & non-deleted songs.
+// When distributorId is provided, only songs linked to that distributor
+// (via songdistributor where status=1 AND is_deleted=0) are exported.
 // Columns: Song ID, ISRC Code, Song Name (Sinhala Name), Date (empty), Amount (empty)
 exports.exportRevenueTemplate = async (req, res) => {
   try {
     const pool = getPool();
-    
-    // Fetch active non-deleted songs
-    const [songs] = await pool.query(`
-      SELECT id, name, nameSinhala, isrcCode
-      FROM songs
-      WHERE (status = 1 OR status = 'Active' OR status IS NULL)
-        AND (is_delete = 0 OR is_delete IS NULL)
-      ORDER BY id ASC
-    `);
+    const distributorId = req.query.distributorId ? parseInt(req.query.distributorId, 10) : null;
+
+    let songs;
+    let distributorLabel = '';
+
+    if (distributorId && !isNaN(distributorId)) {
+      // Fetch distributor info for filename/label
+      const [distRows] = await pool.query(
+        `SELECT company_name, email FROM distributors WHERE id = ? AND is_deleted = 0 AND status = 1`,
+        [distributorId]
+      );
+      if (distRows.length === 0) {
+        return res.status(404).json({ message: 'Distributor not found or is inactive' });
+      }
+      distributorLabel = distRows[0].company_name || distRows[0].email || `dist_${distributorId}`;
+
+      // Only songs linked to this active distributor (song must also be active & non-deleted)
+      [songs] = await pool.query(`
+        SELECT DISTINCT s.id, s.name, s.nameSinhala, s.isrcCode
+        FROM songs s
+        JOIN songdistributor sd ON sd.song_id = s.id
+        WHERE sd.distributor_id = ?
+          AND sd.status = 1
+          AND sd.is_deleted = 0
+          AND s.status = 1
+          AND (s.is_delete = 0 OR s.is_delete IS NULL)
+        ORDER BY s.id ASC
+      `, [distributorId]);
+    } else {
+      // All active non-deleted songs
+      [songs] = await pool.query(`
+        SELECT id, name, nameSinhala, isrcCode
+        FROM songs
+        WHERE (status = 1 OR status = 'Active' OR status IS NULL)
+          AND (is_delete = 0 OR is_delete IS NULL)
+        ORDER BY id ASC
+      `);
+    }
 
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Revenue Template');
@@ -610,9 +641,12 @@ exports.exportRevenueTemplate = async (req, res) => {
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     );
+    const safeLabel = distributorLabel
+      ? `_${distributorLabel.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 40)}`
+      : '';
     res.setHeader(
       'Content-Disposition',
-      'attachment; filename=revenue_template.xlsx'
+      `attachment; filename=revenue_template${safeLabel}.xlsx`
     );
 
     await workbook.xlsx.write(res);

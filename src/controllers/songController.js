@@ -514,7 +514,21 @@ exports.createSong = async (req, res) => {
     await insertRelations(lyricists, 'lyricist', req.body.mainLyricist || req.body.mainLyricistId);
     await insertRelations(musicians, 'musician', req.body.mainMusician || req.body.mainMusicianId);
 
-    // 1. Save distributor mapping
+    // Auto-update artist role flags: if an artist is used in a role but their column is 0, set it to 1
+    const updateArtistRoleFlags = async (artistList, column) => {
+      for (const item of artistList) {
+        let idVal = typeof item === 'object' && item !== null ? (item.id || item.value) : item;
+        const artistId = parseInt(idVal, 10);
+        if (!isNaN(artistId)) {
+          await pool.query(`UPDATE artists SET ${column} = 1 WHERE id = ? AND ${column} != 1`, [artistId]);
+        }
+      }
+    };
+    await updateArtistRoleFlags(singers, 'singer');
+    await updateArtistRoleFlags(lyricists, 'lyrics');
+    await updateArtistRoleFlags(musicians, 'music');
+
+
     let distributorId = null;
     let distributionProvider = null;
     if (req.body.distribution) {
@@ -975,6 +989,20 @@ exports.updateSong = async (req, res) => {
     if (Array.isArray(singers)) await insertRelations(singers, 'songSinger', req.body.mainSinger || req.body.mainSingerId);
     if (Array.isArray(lyricists)) await insertRelations(lyricists, 'songLyrics', req.body.mainLyricist || req.body.mainLyricistId);
     if (Array.isArray(musicians)) await insertRelations(musicians, 'songmusician', req.body.mainMusician || req.body.mainMusicianId);
+
+    // Auto-update artist role flags: if an artist is used in a role but their column is 0, set it to 1
+    const updateArtistRoleFlags = async (artistList, column) => {
+      for (const item of artistList) {
+        let idVal = typeof item === 'object' && item !== null ? (item.id || item.value) : item;
+        const artistId = parseInt(idVal, 10);
+        if (!isNaN(artistId)) {
+          await pool.query(`UPDATE artists SET ${column} = 1 WHERE id = ? AND ${column} != 1`, [artistId]);
+        }
+      }
+    };
+    if (Array.isArray(singers)) await updateArtistRoleFlags(singers, 'singer');
+    if (Array.isArray(lyricists)) await updateArtistRoleFlags(lyricists, 'lyrics');
+    if (Array.isArray(musicians)) await updateArtistRoleFlags(musicians, 'music');
 
     // 3. Save distributor mapping
     let distributorId = null;

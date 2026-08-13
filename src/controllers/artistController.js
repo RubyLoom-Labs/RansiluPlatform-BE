@@ -67,7 +67,9 @@ exports.getArtists = async (req, res) => {
     if (statusParam !== undefined && statusParam !== '') {
       whereClauses.push('a.status = ?');
       queryParams.push(parseInt(statusParam, 10));
-    } else if (role) {
+    } else {
+      // Default: only return active artists (status=1) when no explicit status filter is provided.
+      // This ensures all dropdowns (artist, lyrics, music) only show active artists.
       whereClauses.push('a.status = 1');
     }
 
